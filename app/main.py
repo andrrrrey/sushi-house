@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 import os
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -10,6 +10,7 @@ from sqlalchemy import func, select, text
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.db import Base, SessionLocal, engine
+from app.iiko import IikoClient, IikoError
 from app.models import AuditEvent, IntegrationSetting, User
 from app.security import decrypt_setting, encrypt_setting, get_csrf_token, hash_password, verify_csrf, verify_password
 from app.settings_catalog import SETTINGS, SETTINGS_BY_KEY
@@ -27,7 +28,7 @@ async def lifespan(_: FastAPI):
     engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.2.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.3.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ["SESSION_SECRET"],
@@ -70,6 +71,12 @@ def require_user(request: Request) -> User | RedirectResponse:
 
 def page_context(request: Request, **values):
     return {"request": request, "csrf_token": get_csrf_token(request), **values}
+
+
+def load_settings(*keys: str) -> dict[str, str]:
+    with SessionLocal() as db:
+        records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(keys))).all()
+    return {record.key: decrypt_setting(record.encrypted_value) for record in records}
 
 
 @app.get("/setup", response_class=HTMLResponse)
@@ -171,9 +178,75 @@ async def dashboard(request: Request):
             configured_count=len(configured),
             services=[
                 {"name": "Сервер", "state": "Работает", "tone": "ok", "meta": "FastAPI · PostgreSQL"},
-                {"name": "iikoCloud", "state": "Ожидает настройки", "tone": "wait", "meta": "Чтение без изменений"},
-                {"name": "Mango SIP", "state": "Ожидает настройки", "tone": "wait", "meta": "Тестовый режим"},
+                {"name": "iikoCloud", "state": "Готов к проверке" if {"iiko_api_login", "iiko_app_id", "iiko_client_secret"}.issubset(configured) else "Ожидает настройки", "tone": "ok" if {"iiko_api_login", "iiko_app_id", "iiko_client_secret"}.issubset(configured) else "wait", "meta": "Чтение без изменений"},
+                {"name": "Mango SIP", "state": "Доступы сохранены" if {"mango_sip_server", "mango_sip_login", "mango_sip_password"}.issubset(configured) else "Ожидает настройки", "tone": "ok" if {"mango_sip_server", "mango_sip_login", "mango_sip_password"}.issubset(configured) else "wait", "meta": "Тестовый режим"},
             ],
+        ),
+    )
+
+
+@app.get("/iiko", response_class=HTMLResponse)
+async def iiko_page(request: Request):
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    settings = load_settings("iiko_api_login", "iiko_app_id", "iiko_client_secret")
+    today = date.today()
+    return templates.TemplateResponse(
+        request=request,
+        name="iiko.html",
+        context=page_context(
+            request,
+            user=user,
+            active="iiko",
+            configured=len(settings) == 3,
+            date_from=(today - timedelta(days=1)).isoformat(),
+            date_to=today.isoformat(),
+            result=None,
+        ),
+    )
+
+
+@app.post("/iiko/check", response_class=HTMLResponse)
+async def iiko_check(
+    request: Request,
+    date_from: date = Form(...),
+    date_to: date = Form(...),
+    csrf_token: str = Form(...),
+):
+    verify_csrf(request, csrf_token)
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    settings = load_settings("iiko_api_login", "iiko_app_id", "iiko_client_secret")
+    error = None
+    result = None
+    if len(settings) != 3:
+        error = "Сначала сохраните API Login, App ID и Client Secret в настройках."
+    elif date_to < date_from or (date_to - date_from).days > 7:
+        error = "Выберите период не более 7 дней, дата окончания должна быть не раньше даты начала."
+    else:
+        try:
+            async with IikoClient(
+                settings["iiko_api_login"], settings["iiko_app_id"], settings["iiko_client_secret"]
+            ) as client:
+                result = await client.diagnose(date_from, date_to)
+            with SessionLocal.begin() as db:
+                db.add(AuditEvent(event_type="iiko_diagnostic", actor=user.username, details=f"{date_from}/{date_to}: {len(result.orders)} orders"))
+        except IikoError as exc:
+            error = str(exc)
+    return templates.TemplateResponse(
+        request=request,
+        name="iiko.html",
+        context=page_context(
+            request,
+            user=user,
+            active="iiko",
+            configured=len(settings) == 3,
+            date_from=date_from.isoformat(),
+            date_to=date_to.isoformat(),
+            result=result,
+            error=error,
         ),
     )
 

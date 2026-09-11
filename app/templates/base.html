@@ -17,7 +17,7 @@
       <nav class="nav-pills" aria-label="Основная навигация">
         <a class="{{ 'active' if active == 'dashboard' else '' }}" href="/">Обзор</a>
         <a href="#" aria-disabled="true">Звонки</a>
-        <a href="#" aria-disabled="true">Заказы</a>
+        <a class="{{ 'active' if active == 'iiko' else '' }}" href="/iiko">iiko</a>
         <a class="{{ 'active' if active == 'settings' else '' }}" href="/settings">Настройки</a>
       </nav>
       <form action="/logout" method="post">
@@ -30,4 +30,3 @@
   </div>
 </body>
 </html>
-

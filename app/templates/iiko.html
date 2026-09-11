@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}iikoCloud · Sushi House{% endblock %}
+{% block content %}
+<main class="glass-panel settings-panel">
+  <section class="hero-row compact">
+    <div><div class="eyebrow">iikoCloud · только чтение</div><h1>Диагностика заказов</h1><p>Показывает фактические данные, доступные приложению через API.</p></div>
+    <span class="quiet-chip">{{ 'Доступы сохранены' if configured else 'Требуются доступы' }}</span>
+  </section>
+
+  {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+
+  <section class="soft-card iiko-filter">
+    <form action="/iiko/check" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Дата начала<input type="date" name="date_from" value="{{ date_from }}" required></label>
+      <label>Дата окончания<input type="date" name="date_to" value="{{ date_to }}" required></label>
+      <button class="cream-button" type="submit" {% if not configured %}disabled{% endif %}>Запустить проверку <span>↗</span></button>
+    </form>
+    <small>Без подтверждения, отмены и изменения заказов. Максимальный период — 7 дней.</small>
+  </section>
+
+  {% if result %}
+  <section class="metric-grid">
+    <article class="metric-card"><span>Организации</span><strong>{{ result.organizations|length }}</strong></article>
+    <article class="metric-card"><span>Терминальные группы</span><strong>{{ result.terminal_groups }}</strong></article>
+    <article class="metric-card"><span>Внешние меню</span><strong>{{ result.external_menus|length }}</strong></article>
+    <article class="metric-card"><span>Заказы</span><strong>{{ result.orders|length }}</strong></article>
+  </section>
+
+  {% if result.errors %}
+  <div class="notice error"><strong>Частичные ошибки:</strong><ul>{% for item in result.errors %}<li>{{ item }}</li>{% endfor %}</ul></div>
+  {% endif %}
+
+  <section class="soft-card result-card">
+    <div class="section-heading"><div><span>Результат API</span><h2>Заказы за период</h2></div><span class="quiet-chip">{{ result.orders|length }} найдено</span></div>
+    {% if result.orders %}
+    <div class="data-table-wrap"><table class="data-table">
+      <thead><tr><th>№</th><th>Организация</th><th>Статус</th><th>Источник</th><th>Клиент</th><th>Курьер</th><th>Сумма</th></tr></thead>
+      <tbody>{% for order in result.orders %}<tr>
+        <td><strong>{{ order.number }}</strong></td><td>{{ order.organization }}</td><td>{{ order.status }}</td><td>{{ order.source }}</td><td>{{ order.customer }}</td><td>{{ order.courier }}</td><td>{{ order.sum if order.sum is not none else '—' }}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}
+    <div class="empty-state"><strong>API вернул 0 заказов</strong><p>Соединение может работать корректно, но заказы этому приложению не передаются. Это отдельный результат, а не подтверждение наличия заказов.</p></div>
+    {% endif %}
+  </section>
+  {% endif %}
+</main>
+{% endblock %}
