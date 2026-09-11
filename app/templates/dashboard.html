@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sushi House Voice Robot</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+    body { margin: 0; background: #0b1020; color: #edf2ff; }
+    main { max-width: 980px; margin: 0 auto; padding: 48px 24px; }
+    .eyebrow { color: #91a4ca; text-transform: uppercase; letter-spacing: .12em; font-size: 12px; }
+    h1 { margin: 10px 0 8px; font-size: clamp(30px, 5vw, 48px); }
+    .subtitle { color: #aebbd5; margin: 0 0 32px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+    .card { padding: 20px; border: 1px solid #273451; border-radius: 16px; background: #121a2e; }
+    .card h2 { margin: 0 0 12px; font-size: 17px; }
+    .state { display: inline-block; padding: 7px 10px; border-radius: 999px; font-size: 13px; }
+    .ok { background: #123d31; color: #83edc4; }
+    .wait { background: #3b3216; color: #f3d879; }
+    footer { margin-top: 32px; color: #7182a6; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">Технический MVP · этап 1</div>
+    <h1>Sushi House Voice Robot</h1>
+    <p class="subtitle">Закрытая панель контроля интеграций iikoCloud и Mango Office.</p>
+    <section class="grid">
+      {% for service in services %}
+      <article class="card">
+        <h2>{{ service.name }}</h2>
+        <span class="state {{ service.tone }}">{{ service.state }}</span>
+      </article>
+      {% endfor %}
+    </section>
+    <footer>Состояние сформировано: {{ generated_at }}</footer>
+  </main>
+</body>
+</html>
