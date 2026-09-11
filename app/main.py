@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select, text
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.db import Base, SessionLocal, engine
 from app.iiko import IikoClient, IikoError
@@ -28,7 +29,11 @@ async def lifespan(_: FastAPI):
     engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.3.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.3.1", docs_url=None, redoc_url=None, lifespan=lifespan)
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["5-129-249-100.sslip.io", "5.129.249.100", "127.0.0.1", "localhost", "testserver"],
+)
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ["SESSION_SECRET"],
