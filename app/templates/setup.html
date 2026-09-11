@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Первичная настройка · Sushi House{% endblock %}
+{% block content %}
+<main class="auth-wrap"><section class="glass-panel auth-card setup-card">
+  <div class="brand auth-brand"><span class="brand-mark">SH</span><span><strong>Sushi House</strong><small>Voice operations</small></span></div>
+  <div class="eyebrow">Первый запуск</div><h1>Создайте администратора</h1>
+  <p>Страница доступна только через SSH-туннель. После создания учётной записи повторная настройка закроется.</p>
+  {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+  <form method="post" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Логин<input name="username" value="{{ username or '' }}" autocomplete="username" minlength="3" required autofocus></label>
+    <label>Пароль<input type="password" name="password" autocomplete="new-password" minlength="12" required><small>Минимум 12 символов</small></label>
+    <label>Повторите пароль<input type="password" name="password_repeat" autocomplete="new-password" minlength="12" required></label>
+    <button class="cream-button full" type="submit">Создать администратора</button>
+  </form>
+</section></main>
+{% endblock %}
+

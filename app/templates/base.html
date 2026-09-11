@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{% block title %}Sushi House{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <div class="page-shell">
+    {% if user %}
+    <header class="topbar glass-line">
+      <a class="brand" href="/"><span class="brand-mark">SH</span><span><strong>Sushi House</strong><small>Voice operations</small></span></a>
+      <nav class="nav-pills" aria-label="Основная навигация">
+        <a class="{{ 'active' if active == 'dashboard' else '' }}" href="/">Обзор</a>
+        <a href="#" aria-disabled="true">Звонки</a>
+        <a href="#" aria-disabled="true">Заказы</a>
+        <a class="{{ 'active' if active == 'settings' else '' }}" href="/settings">Настройки</a>
+      </nav>
+      <form action="/logout" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="profile-chip" type="submit"><span>{{ user.username[:1]|upper }}</span>{{ user.username }}</button>
+      </form>
+    </header>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>
+

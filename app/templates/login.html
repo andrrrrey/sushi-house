@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Вход · Sushi House{% endblock %}
+{% block content %}
+<main class="auth-wrap"><section class="glass-panel auth-card">
+  <div class="brand auth-brand"><span class="brand-mark">SH</span><span><strong>Sushi House</strong><small>Voice operations</small></span></div>
+  <div class="eyebrow">Закрытая панель</div><h1>Вход</h1><p>Управление телефонией, заказами и интеграциями.</p>
+  {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+  <form method="post" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Логин<input name="username" autocomplete="username" required autofocus></label>
+    <label>Пароль<input type="password" name="password" autocomplete="current-password" required></label>
+    <button class="cream-button full" type="submit">Войти</button>
+  </form>
+</section></main>
+{% endblock %}
+

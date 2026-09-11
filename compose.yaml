@@ -5,6 +5,9 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: ${DATABASE_URL}
+      SESSION_SECRET: ${SESSION_SECRET}
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:8000"
     depends_on:
@@ -42,4 +45,3 @@ networks:
 
 volumes:
   postgres_data:
-

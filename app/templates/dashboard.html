@@ -1,39 +1,34 @@
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sushi House Voice Robot</title>
-  <style>
-    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
-    body { margin: 0; background: #0b1020; color: #edf2ff; }
-    main { max-width: 980px; margin: 0 auto; padding: 48px 24px; }
-    .eyebrow { color: #91a4ca; text-transform: uppercase; letter-spacing: .12em; font-size: 12px; }
-    h1 { margin: 10px 0 8px; font-size: clamp(30px, 5vw, 48px); }
-    .subtitle { color: #aebbd5; margin: 0 0 32px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
-    .card { padding: 20px; border: 1px solid #273451; border-radius: 16px; background: #121a2e; }
-    .card h2 { margin: 0 0 12px; font-size: 17px; }
-    .state { display: inline-block; padding: 7px 10px; border-radius: 999px; font-size: 13px; }
-    .ok { background: #123d31; color: #83edc4; }
-    .wait { background: #3b3216; color: #f3d879; }
-    footer { margin-top: 32px; color: #7182a6; font-size: 13px; }
-  </style>
-</head>
-<body>
-  <main>
-    <div class="eyebrow">Технический MVP · этап 1</div>
-    <h1>Sushi House Voice Robot</h1>
-    <p class="subtitle">Закрытая панель контроля интеграций iikoCloud и Mango Office.</p>
-    <section class="grid">
-      {% for service in services %}
-      <article class="card">
-        <h2>{{ service.name }}</h2>
-        <span class="state {{ service.tone }}">{{ service.state }}</span>
-      </article>
-      {% endfor %}
-    </section>
-    <footer>Состояние сформировано: {{ generated_at }}</footer>
-  </main>
-</body>
-</html>
+{% extends "base.html" %}
+{% block title %}Обзор · Sushi House{% endblock %}
+{% block content %}
+<main class="glass-panel dashboard-panel">
+  <section class="hero-row">
+    <div><div class="eyebrow">Технический MVP · этап 2</div><h1>Центр управления</h1><p>Спокойный тестовый контур для телефонии и заказов.</p></div>
+    <div class="hero-metric"><span>Настроено параметров</span><strong>{{ configured_count }}</strong><small>из 13 доступных</small></div>
+  </section>
+  <section class="status-grid">
+    {% for service in services %}
+    <article class="status-card">
+      <div class="card-top"><span class="status-dot {{ service.tone }}"></span><small>{{ service.meta }}</small></div>
+      <h2>{{ service.name }}</h2><span class="status-label {{ service.tone }}">{{ service.state }}</span>
+    </article>
+    {% endfor %}
+  </section>
+  <section class="workspace-grid">
+    <article class="soft-card wide-card">
+      <div class="section-heading"><div><span>План запуска</span><h2>Интеграционный контур</h2></div><span class="quiet-chip">Без ИИ-звонков</span></div>
+      <div class="timeline">
+        <div class="timeline-item done"><b>01</b><span><strong>Сервер</strong><small>Контейнеры и база готовы</small></span></div>
+        <div class="timeline-item current"><b>02</b><span><strong>Настройки</strong><small>Защищённое хранение ключей</small></span></div>
+        <div class="timeline-item"><b>03</b><span><strong>iikoCloud</strong><small>Диагностика заказов</small></span></div>
+        <div class="timeline-item"><b>04</b><span><strong>Mango</strong><small>Контролируемый SIP-тест</small></span></div>
+      </div>
+    </article>
+    <article class="soft-card action-card">
+      <span>Следующее действие</span><h2>Добавить доступы</h2><p>Значения шифруются и больше не показываются открыто.</p>
+      <a class="cream-button" href="/settings">Открыть настройки <span>↗</span></a>
+    </article>
+  </section>
+  <footer>Обновлено {{ generated_at }}</footer>
+</main>
+{% endblock %}
