@@ -25,7 +25,14 @@ class IikoClientTests(unittest.IsolatedAsyncioTestCase):
                                 "number": "141737",
                                 "sourceKey": "Starter",
                                 "customer": {"name": "Тест"},
-                                "courierInfo": {"name": "Курьер"},
+                                "courierInfo": {
+                                    "courier": {
+                                        "id": "courier-1",
+                                        "name": "Курьер",
+                                        "phone": "+70000000000",
+                                    },
+                                    "isCourierSelectedManually": False,
+                                },
                                 "sum": 1250,
                             },
                         }],

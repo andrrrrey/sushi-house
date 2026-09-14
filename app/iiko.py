@@ -134,7 +134,8 @@ class IikoClient:
                 for group in data.get("ordersByOrganizations", []):
                     for wrapper in group.get("orders", []):
                         order = wrapper.get("order") or {}
-                        courier = order.get("courierInfo") or {}
+                        courier_info = order.get("courierInfo") or {}
+                        courier = courier_info.get("courier") or {}
                         result.orders.append(
                             {
                                 "organization": organization_names.get(organization_id, organization_id),
