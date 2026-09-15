@@ -4,7 +4,7 @@
 <main class="glass-panel dashboard-panel">
   <section class="hero-row">
     <div><div class="eyebrow">Технический MVP · этап 3</div><h1>Центр управления</h1><p>Спокойный тестовый контур для телефонии и заказов.</p></div>
-    <div class="hero-metric"><span>Настроено параметров</span><strong>{{ configured_count }}</strong><small>из 13 доступных</small></div>
+    <div class="hero-metric"><span>Настроено параметров</span><strong>{{ configured_count }}</strong><small>из {{ settings_total }} доступных</small></div>
   </section>
   <section class="status-grid">
     {% for service in services %}

@@ -3,16 +3,18 @@ from datetime import UTC, date, datetime, timedelta
 import os
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.db import Base, SessionLocal, engine
 from app.iiko import IikoClient, IikoError
-from app.models import AuditEvent, IntegrationSetting, User
+from app.mango import MangoEventError, parse_call_event, verify_signature
+from app.models import AuditEvent, IntegrationSetting, MangoCallEvent, User
 from app.security import decrypt_setting, encrypt_setting, get_csrf_token, hash_password, verify_csrf, verify_password
 from app.settings_catalog import SETTINGS, SETTINGS_BY_KEY
 
@@ -29,7 +31,7 @@ async def lifespan(_: FastAPI):
     engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.3.3", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.4.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -188,6 +190,7 @@ async def dashboard(request: Request):
             active="dashboard",
             generated_at=datetime.now(UTC).strftime("%d.%m.%Y %H:%M UTC"),
             configured_count=len(configured),
+            settings_total=len(SETTINGS),
             services=[
                 {"name": "Сервер", "state": "Работает", "tone": "ok", "meta": "FastAPI · PostgreSQL"},
                 {"name": "iikoCloud", "state": "Готов к проверке" if {"iiko_api_login", "iiko_app_id", "iiko_client_secret"}.issubset(configured) else "Ожидает настройки", "tone": "ok" if {"iiko_api_login", "iiko_app_id", "iiko_client_secret"}.issubset(configured) else "wait", "meta": "Чтение без изменений"},
@@ -195,6 +198,89 @@ async def dashboard(request: Request):
             ],
         ),
     )
+
+
+@app.get("/calls", response_class=HTMLResponse)
+async def calls_page(request: Request):
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    with SessionLocal() as db:
+        records = db.scalars(select(MangoCallEvent).order_by(MangoCallEvent.received_at.desc()).limit(100)).all()
+    events = []
+    for record in records:
+        events.append({
+            "call_id": record.call_id,
+            "state": record.call_state,
+            "location": record.location or "—",
+            "from_number": decrypt_setting(record.from_number_encrypted) if record.from_number_encrypted else "—",
+            "to_number": decrypt_setting(record.to_number_encrypted) if record.to_number_encrypted else "—",
+            "extension": record.to_extension or "—",
+            "received_at": record.received_at.strftime("%d.%m.%Y %H:%M:%S"),
+        })
+    mango_settings = load_settings("mango_vpbx_api_key", "mango_vpbx_api_salt")
+    return templates.TemplateResponse(
+        request=request,
+        name="calls.html",
+        context=page_context(
+            request,
+            user=user,
+            active="calls",
+            events=events,
+            callback_configured=len(mango_settings) == 2,
+        ),
+    )
+
+
+@app.get("/mango/events/call")
+async def mango_call_endpoint_status():
+    settings = load_settings("mango_vpbx_api_key", "mango_vpbx_api_salt")
+    return {
+        "status": "ready" if len(settings) == 2 else "awaiting_credentials",
+        "endpoint": "/mango/events/call",
+        "signatureVerification": len(settings) == 2,
+    }
+
+
+@app.post("/mango/events/call")
+async def mango_call_event(request: Request):
+    settings = load_settings("mango_vpbx_api_key", "mango_vpbx_api_salt")
+    if len(settings) != 2:
+        return JSONResponse({"status": "not_configured"}, status_code=503)
+    form = await request.form()
+    received_key = str(form.get("vpbx_api_key") or "")
+    signature = str(form.get("sign") or "")
+    raw_json = str(form.get("json") or "")
+    if not verify_signature(
+        settings["mango_vpbx_api_key"],
+        settings["mango_vpbx_api_salt"],
+        received_key,
+        raw_json,
+        signature,
+    ):
+        return JSONResponse({"status": "invalid_signature"}, status_code=401)
+    try:
+        event = parse_call_event(raw_json)
+    except MangoEventError as exc:
+        return JSONResponse({"status": "invalid_event", "detail": str(exc)}, status_code=400)
+    try:
+        with SessionLocal.begin() as db:
+            db.add(MangoCallEvent(
+                entry_id=event.entry_id,
+                call_id=event.call_id,
+                sequence=event.sequence,
+                call_state=event.call_state,
+                location=event.location,
+                from_number_encrypted=encrypt_setting(event.from_number) if event.from_number else "",
+                to_number_encrypted=encrypt_setting(event.to_number) if event.to_number else "",
+                to_extension=event.to_extension,
+                line_number=event.line_number,
+                disconnect_reason=event.disconnect_reason,
+                event_timestamp=event.event_timestamp,
+            ))
+    except IntegrityError:
+        return {"status": "duplicate"}
+    return {"status": "accepted"}
 
 
 @app.get("/iiko", response_class=HTMLResponse)

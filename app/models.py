@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -37,3 +37,21 @@ class AuditEvent(Base):
     details: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
+
+class MangoCallEvent(Base):
+    __tablename__ = "mango_call_events"
+    __table_args__ = (UniqueConstraint("call_id", "sequence", name="uq_mango_call_event_sequence"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entry_id: Mapped[str] = mapped_column(String(128), index=True, default="")
+    call_id: Mapped[str] = mapped_column(String(128), index=True)
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+    call_state: Mapped[str] = mapped_column(String(40), index=True)
+    location: Mapped[str] = mapped_column(String(40), default="")
+    from_number_encrypted: Mapped[str] = mapped_column(Text, default="")
+    to_number_encrypted: Mapped[str] = mapped_column(Text, default="")
+    to_extension: Mapped[str] = mapped_column(String(40), default="")
+    line_number: Mapped[str] = mapped_column(String(160), default="")
+    disconnect_reason: Mapped[str] = mapped_column(String(40), default="")
+    event_timestamp: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)

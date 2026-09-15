@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Звонки · Sushi House{% endblock %}
+{% block content %}
+<main class="glass-panel settings-panel">
+  <section class="hero-row compact">
+    <div><div class="eyebrow">Mango API Realtime</div><h1>События звонков</h1><p>Подписанные уведомления Mango без запуска исходящих звонков.</p></div>
+    <span class="quiet-chip">{{ 'Подпись настроена' if callback_configured else 'Ожидаются API Key и Salt' }}</span>
+  </section>
+  <section class="soft-card result-card">
+    <div class="section-heading"><div><span>Callback</span><h2>/mango/events/call</h2></div><span class="quiet-chip">{{ events|length }} событий</span></div>
+    {% if events %}
+    <div class="data-table-wrap"><table class="data-table">
+      <thead><tr><th>Получено</th><th>Состояние</th><th>Откуда</th><th>Куда</th><th>Внутренний</th><th>Расположение</th></tr></thead>
+      <tbody>{% for event in events %}<tr>
+        <td>{{ event.received_at }}</td><td><strong>{{ event.state }}</strong></td><td>{{ event.from_number }}</td><td>{{ event.to_number }}</td><td>{{ event.extension }}</td><td>{{ event.location }}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}
+    <div class="empty-state"><strong>Событий пока нет</strong><p>Endpoint опубликован. До получения API Key и Salt подписанные события не принимаются.</p></div>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

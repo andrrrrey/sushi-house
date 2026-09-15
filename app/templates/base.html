@@ -16,7 +16,7 @@
       <a class="brand" href="/"><span class="brand-mark">SH</span><span><strong>Sushi House</strong><small>Voice operations</small></span></a>
       <nav class="nav-pills" aria-label="Основная навигация">
         <a class="{{ 'active' if active == 'dashboard' else '' }}" href="/">Обзор</a>
-        <a href="#" aria-disabled="true">Звонки</a>
+        <a class="{{ 'active' if active == 'calls' else '' }}" href="/calls">Звонки</a>
         <a class="{{ 'active' if active == 'iiko' else '' }}" href="/iiko">iiko</a>
         <a class="{{ 'active' if active == 'settings' else '' }}" href="/settings">Настройки</a>
       </nav>

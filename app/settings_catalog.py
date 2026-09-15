@@ -23,6 +23,7 @@ SETTINGS = (
     SettingDefinition("mango_outbound_number", "Исходящий Caller ID", "Mango Office", "Номер для исходящих", False),
     SettingDefinition("mango_vpbx_api_key", "VBPX API Key", "Mango API", "Появится после подключения API"),
     SettingDefinition("mango_vpbx_api_salt", "VBPX API Salt", "Mango API", "Ключ подписи запросов"),
+    SettingDefinition("mango_test_phone", "Тестовый номер", "Тестовый контур", "Единственный разрешённый номер для исходящих тестов"),
     SettingDefinition("openai_api_key", "OpenAI API Key", "ИИ-робот", "Используется на втором этапе"),
 )
 
