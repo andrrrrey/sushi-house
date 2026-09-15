@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 import os
+from urllib.parse import quote_plus
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -31,7 +32,7 @@ async def lifespan(_: FastAPI):
     engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.4.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.4.1", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -350,7 +351,7 @@ async def iiko_check(
 
 
 @app.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request, saved: str | None = None):
+async def settings_page(request: Request, saved: str | None = None, error: str | None = None):
     user = require_user(request)
     if isinstance(user, RedirectResponse):
         return user
@@ -361,7 +362,7 @@ async def settings_page(request: Request, saved: str | None = None):
         items = []
         for definition in (item for item in SETTINGS if item.section == section_name):
             record = stored.get(definition.key)
-            visible_value = ""
+            visible_value = definition.default
             if record and not definition.sensitive:
                 visible_value = decrypt_setting(record.encrypted_value)
             items.append({
@@ -374,7 +375,7 @@ async def settings_page(request: Request, saved: str | None = None):
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
-        context=page_context(request, user=user, active="settings", sections=sections, saved=saved),
+        context=page_context(request, user=user, active="settings", sections=sections, saved=saved, error=error),
     )
 
 
@@ -395,6 +396,11 @@ async def update_setting(
     value = value.strip()
     if not value:
         return RedirectResponse("/settings", status_code=303)
+    if len(value) > definition.max_length:
+        return RedirectResponse(f"/settings?error={quote_plus('Слишком длинное значение')}", status_code=303)
+    if setting_key == "mango_test_phone" and (not value.startswith("+") or not value[1:].isdigit() or not 11 <= len(value[1:]) <= 15):
+        error = quote_plus("Тестовый номер нужен в формате +79991234567")
+        return RedirectResponse(f"/settings?error={error}", status_code=303)
     with SessionLocal.begin() as db:
         record = db.scalar(select(IntegrationSetting).where(IntegrationSetting.key == setting_key))
         encrypted = encrypt_setting(value)
