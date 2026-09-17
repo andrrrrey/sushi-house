@@ -13,8 +13,12 @@ services:
       ASTERISK_AMI_USER: voice_robot
       ASTERISK_AMI_SECRET: ${ASTERISK_AMI_SECRET}
       ASTERISK_DYNAMIC_CONFIG: /runtime/asterisk/pjsip_mango.conf
+      AUDIO_SOCKET_HOST: 0.0.0.0
+      AUDIO_SOCKET_PORT: 9092
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:8000"
+    expose:
+      - "9092"
     depends_on:
       db:
         condition: service_healthy

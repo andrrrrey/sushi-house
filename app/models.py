@@ -55,3 +55,17 @@ class MangoCallEvent(Base):
     disconnect_reason: Mapped[str] = mapped_column(String(40), default="")
     event_timestamp: Mapped[int | None] = mapped_column(Integer, nullable=True)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class TestCall(Base):
+    __tablename__ = "test_calls"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    phone_encrypted: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(120), default="")
+    transcript: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

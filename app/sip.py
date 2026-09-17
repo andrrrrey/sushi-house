@@ -11,6 +11,7 @@ import uuid
 SIP_REQUIRED_KEYS = ("mango_sip_server", "mango_sip_login", "mango_sip_password")
 HOST_PATTERN = re.compile(r"^[a-z0-9.-]+$")
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9_.+/@-]+$")
+PHONE_PATTERN = re.compile(r"^\+[1-9][0-9]{10,14}$")
 
 
 class SipError(RuntimeError):
@@ -167,7 +168,7 @@ class AmiClient:
                 return response
         raise SipError("Asterisk AMI не вернул ответ на команду")
 
-    def command(self, command: str) -> list[str]:
+    def action(self, action: str, **values: str) -> list[str]:
         try:
             with socket.create_connection((self.host, self.port), timeout=self.timeout) as connection:
                 connection.settimeout(self.timeout)
@@ -178,14 +179,32 @@ class AmiClient:
                 login = self._send_action(stream, "Login", Username=self.username, Secret=self.secret)
                 if not any(line == "Response: Success" for line in login):
                     raise SipError("Asterisk AMI отклонил авторизацию")
-                response = self._send_action(stream, "Command", Command=command)
+                response = self._send_action(stream, action, **values)
                 try:
                     self._send_action(stream, "Logoff")
                 except SipError:
                     pass
-                return [line[8:] for line in response if line.startswith("Output: ")]
+                return response
         except (OSError, TimeoutError) as exc:
             raise SipError(f"Asterisk AMI недоступен: {exc}") from exc
+
+    def command(self, command: str) -> list[str]:
+        response = self.action("Command", Command=command)
+        return [line[8:] for line in response if line.startswith("Output: ")]
+
+    def originate(self, channel: str, application: str, data: str, caller_id: str, timeout_ms: int = 45000) -> None:
+        response = self.action(
+            "Originate",
+            Channel=channel,
+            Application=application,
+            Data=data,
+            CallerID=caller_id,
+            Timeout=str(timeout_ms),
+            Async="true",
+        )
+        if not any(line == "Response: Success" for line in response):
+            message = next((line[9:] for line in response if line.startswith("Message: ")), "Originate rejected")
+            raise SipError(f"Asterisk не запустил звонок: {message}")
 
 
 def ami_client() -> AmiClient:
@@ -225,3 +244,21 @@ def apply_registration(settings: dict[str, str]) -> SipStatus:
         time.sleep(1)
         status = registration_status()
     return status
+
+
+def originate_test_call(phone: str, call_id: str, caller_id: str) -> None:
+    if not PHONE_PATTERN.fullmatch(phone):
+        raise SipError("Тестовый номер должен быть в международном формате")
+    try:
+        uuid.UUID(call_id)
+    except ValueError as exc:
+        raise SipError("Некорректный идентификатор тестового звонка") from exc
+    normalized_caller_id = caller_id.strip()
+    if normalized_caller_id and not PHONE_PATTERN.fullmatch(normalized_caller_id):
+        raise SipError("Некорректный исходящий Caller ID")
+    ami_client().originate(
+        channel=f"PJSIP/{phone}@mango-endpoint",
+        application="AudioSocket",
+        data=f"{call_id},app:9092",
+        caller_id=normalized_caller_id or phone,
+    )

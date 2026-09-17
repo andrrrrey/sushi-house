@@ -10,3 +10,4 @@ argon2-cffi>=23,<26
 itsdangerous>=2.2,<3.0
 python-multipart>=0.0.18,<1.0
 httpx>=0.27,<1.0
+websockets>=14,<16

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.sip import SipError, normalize_server, render_pjsip_config, write_pjsip_config
+from app.sip import AmiClient, SipError, normalize_server, render_pjsip_config, write_pjsip_config
 
 
 class SipConfigTests(unittest.TestCase):
@@ -42,6 +42,22 @@ class SipConfigTests(unittest.TestCase):
             }, str(target))
             self.assertTrue(target.exists())
             self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+
+    def test_ami_originate_requires_success_response(self):
+        client = AmiClient("asterisk", 5038, "user", "secret")
+        client.action = lambda *args, **kwargs: ["Response: Success"]
+        client.originate(
+            "PJSIP/+79991234567@mango-endpoint",
+            "AudioSocket",
+            "00000000-0000-0000-0000-000000000001,app:9092",
+            "+73012555777",
+        )
+
+    def test_ami_originate_surfaces_rejection(self):
+        client = AmiClient("asterisk", 5038, "user", "secret")
+        client.action = lambda *args, **kwargs: ["Response: Error", "Message: Originate failed"]
+        with self.assertRaises(SipError):
+            client.originate("PJSIP/test", "AudioSocket", "data", "+73012555777")
 
 
 if __name__ == "__main__":

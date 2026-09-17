@@ -8,6 +8,8 @@
   </section>
   {% if sip_saved %}<div class="notice success">SIP: {{ sip_saved }}</div>{% endif %}
   {% if sip_error %}<div class="notice error">{{ sip_error }}</div>{% endif %}
+  {% if call_started %}<div class="notice success">Тестовый звонок поставлен в очередь. ID: {{ call_started }}</div>{% endif %}
+  {% if call_error %}<div class="notice error">{{ call_error }}</div>{% endif %}
   <section class="soft-card result-card sip-card">
     <div class="section-heading">
       <div><span>PJSIP · Asterisk</span><h2>Подключение Mango</h2></div>
@@ -23,6 +25,44 @@
       <div><span>RTP</span><strong>10000–10100 UDP</strong></div>
     </div>
     <small class="technical-detail">{{ sip_status.detail }}</small>
+  </section>
+  <section class="soft-card result-card test-call-card">
+    <div class="section-heading">
+      <div><span>OpenAI Realtime · {{ realtime_model }}</span><h2>Безопасный тестовый звонок</h2></div>
+      <form method="post" action="/calls/test/start">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="cream-button" type="submit" {{ 'disabled' if not test_call_ready else '' }}>Запустить звонок</button>
+      </form>
+    </div>
+    <div class="sip-summary test-call-summary">
+      <div><span>Разрешённый номер</span><strong>{{ test_phone }}</strong></div>
+      <div><span>Аудиомост</span><strong>PCM 8 ↔ 24 кГц</strong></div>
+      <div><span>iiko</span><strong>Только чтение</strong></div>
+      <div><span>Одновременно</span><strong>1 звонок</strong></div>
+    </div>
+    {% if test_call_blockers %}
+      <small class="technical-detail">Для запуска требуется: {{ test_call_blockers|join(', ') }}.</small>
+    {% else %}
+      <small class="technical-detail">Робот позвонит только на сохранённый тестовый номер. Подтверждение останется в журнале и не будет отправлено в iiko.</small>
+    {% endif %}
+  </section>
+  <section class="soft-card result-card">
+    <div class="section-heading"><div><span>Последние 20 запусков</span><h2>Тестовый контур</h2></div><span class="quiet-chip">{{ test_calls|length }}</span></div>
+    {% if test_calls %}
+    <div class="test-call-list">
+      {% for call in test_calls %}
+      <article class="test-call-row">
+        <div><span>{{ call.created_at }} · {{ call.phone }}</span><strong>{{ call.status_label }}</strong></div>
+        <div><span>Модель</span><strong>{{ call.model }}</strong></div>
+        <code>{{ call.id }}</code>
+        {% if call.error %}<p class="call-error">{{ call.error }}</p>{% endif %}
+        {% if call.transcript %}<details><summary>Расшифровка ответа робота</summary><pre>{{ call.transcript }}</pre></details>{% endif %}
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state"><strong>Тестовых звонков пока не было</strong><p>После регистрации Mango и заполнения настроек здесь появятся состояния звонка и расшифровка речи робота.</p></div>
+    {% endif %}
   </section>
   <section class="soft-card result-card">
     <div class="section-heading"><div><span>API Realtime · {{ 'подпись настроена' if callback_configured else 'ожидаются API Key и Salt' }}</span><h2>/mango/events/call</h2></div><span class="quiet-chip">{{ events|length }} событий</span></div>

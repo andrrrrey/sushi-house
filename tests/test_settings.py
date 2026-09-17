@@ -68,8 +68,18 @@ def test_calls_template_renders_sip_registration_status():
         sip_status=SipStatus("registered", "Зарегистрирован", "mango-registration Registered", True),
         sip_saved=None,
         sip_error=None,
+        call_started=None,
+        call_error=None,
+        test_phone="••••4567",
+        realtime_model="gpt-realtime-2",
+        realtime_ready=True,
+        test_call_ready=True,
+        test_call_blockers=[],
+        test_calls=[],
     )
 
     assert "Подключение Mango" in html
     assert "Зарегистрирован" in html
     assert "Применить и проверить" in html
+    assert "Запустить звонок" in html
+    assert "Только чтение" in html

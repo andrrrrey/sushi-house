@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
+import asyncio
 from datetime import UTC, date, datetime, timedelta
 import logging
 import os
 from urllib.parse import quote_plus
+import uuid
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -16,14 +18,16 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.db import Base, SessionLocal, engine
 from app.iiko import IikoClient, IikoError
 from app.mango import MangoEventError, parse_call_event, verify_signature
-from app.models import AuditEvent, IntegrationSetting, MangoCallEvent, User
+from app.models import AuditEvent, IntegrationSetting, MangoCallEvent, TestCall, User
+from app.realtime import ACTIVE_CALL_STATES, audio_bridge
 from app.security import decrypt_setting, encrypt_setting, get_csrf_token, hash_password, verify_csrf, verify_password
 from app.settings_catalog import SETTINGS, SETTINGS_BY_KEY
-from app.sip import SIP_REQUIRED_KEYS, SipError, apply_registration, registration_status
+from app.sip import SIP_REQUIRED_KEYS, SipError, apply_registration, originate_test_call, registration_status
 
 
 templates = Jinja2Templates(directory="app/templates")
 logger = logging.getLogger(__name__)
+test_call_start_lock = asyncio.Lock()
 
 
 @asynccontextmanager
@@ -38,11 +42,15 @@ async def lifespan(_: FastAPI):
             logger.info("Mango SIP startup status: %s", status.state)
     except SipError as exc:
         logger.warning("Mango SIP startup failed: %s", exc)
-    yield
-    engine.dispose()
+    await audio_bridge.start()
+    try:
+        yield
+    finally:
+        await audio_bridge.stop()
+        engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.5.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.6.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -102,6 +110,25 @@ def load_settings(*keys: str) -> dict[str, str]:
     with SessionLocal() as db:
         records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(keys))).all()
     return {record.key: decrypt_setting(record.encrypted_value) for record in records}
+
+
+def effective_voice_settings() -> dict[str, str]:
+    keys = (
+        "openai_api_key",
+        "openai_realtime_model",
+        "openai_voice",
+        "openai_system_prompt",
+        "mango_test_phone",
+        "mango_outbound_number",
+    )
+    values = load_settings(*keys)
+    for key in ("openai_realtime_model", "openai_voice", "openai_system_prompt"):
+        values.setdefault(key, SETTINGS_BY_KEY[key].default)
+    return values
+
+
+def mask_phone(phone: str) -> str:
+    return f"••••{phone[-4:]}" if len(phone) >= 4 else "••••"
 
 
 @app.get("/setup", response_class=HTMLResponse)
@@ -217,12 +244,15 @@ async def calls_page(
     request: Request,
     sip_saved: str | None = None,
     sip_error: str | None = None,
+    call_started: str | None = None,
+    call_error: str | None = None,
 ):
     user = require_user(request)
     if isinstance(user, RedirectResponse):
         return user
     with SessionLocal() as db:
         records = db.scalars(select(MangoCallEvent).order_by(MangoCallEvent.received_at.desc()).limit(100)).all()
+        call_records = db.scalars(select(TestCall).order_by(TestCall.created_at.desc()).limit(20)).all()
     events = []
     for record in records:
         events.append({
@@ -237,6 +267,33 @@ async def calls_page(
     mango_settings = load_settings("mango_vpbx_api_key", "mango_vpbx_api_salt")
     sip_settings = load_settings(*SIP_REQUIRED_KEYS)
     sip_status = registration_status()
+    voice_settings = effective_voice_settings()
+    missing_voice_settings = []
+    if not voice_settings.get("openai_api_key"):
+        missing_voice_settings.append("OpenAI API Key")
+    if not voice_settings.get("mango_test_phone"):
+        missing_voice_settings.append("тестовый номер")
+    test_calls = []
+    status_labels = {
+        "dialing": "Набор номера",
+        "connected": "Разговор",
+        "completed": "Завершён",
+        "not_answered": "Нет ответа",
+        "failed": "Ошибка",
+        "interrupted": "Прерван",
+    }
+    for record in call_records:
+        phone = decrypt_setting(record.phone_encrypted)
+        test_calls.append({
+            "id": record.id,
+            "status": record.status,
+            "status_label": status_labels.get(record.status, record.status),
+            "phone": mask_phone(phone),
+            "model": record.model,
+            "transcript": record.transcript,
+            "error": record.error,
+            "created_at": record.created_at.strftime("%d.%m.%Y %H:%M:%S"),
+        })
     return templates.TemplateResponse(
         request=request,
         name="calls.html",
@@ -250,6 +307,14 @@ async def calls_page(
             sip_status=sip_status,
             sip_saved=sip_saved,
             sip_error=sip_error,
+            call_started=call_started,
+            call_error=call_error,
+            test_phone=mask_phone(voice_settings["mango_test_phone"]) if voice_settings.get("mango_test_phone") else "—",
+            realtime_model=voice_settings["openai_realtime_model"],
+            realtime_ready=not missing_voice_settings,
+            test_call_ready=sip_status.registered and not missing_voice_settings,
+            test_call_blockers=missing_voice_settings + ([] if sip_status.registered else ["регистрация Mango SIP"]),
+            test_calls=test_calls,
         ),
     )
 
@@ -278,6 +343,55 @@ async def mango_sip_apply(request: Request, csrf_token: str = Form(...)):
     with SessionLocal.begin() as db:
         db.add(AuditEvent(event_type="mango_sip_applied", actor=user.username, details=status.state))
     return RedirectResponse(f"/calls?sip_saved={quote_plus(status.label)}", status_code=303)
+
+
+@app.post("/calls/test/start")
+async def start_test_call(request: Request, csrf_token: str = Form(...)):
+    verify_csrf(request, csrf_token)
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    sip_status = registration_status()
+    if not sip_status.registered:
+        error = quote_plus("Mango SIP ещё не зарегистрирован: тестовый звонок не запущен")
+        return RedirectResponse(f"/calls?call_error={error}", status_code=303)
+    settings = effective_voice_settings()
+    missing = [key for key in ("openai_api_key", "mango_test_phone") if not settings.get(key)]
+    if missing:
+        error = quote_plus("Сначала сохраните OpenAI API Key и тестовый номер в настройках")
+        return RedirectResponse(f"/calls?call_error={error}", status_code=303)
+    async with test_call_start_lock:
+        with SessionLocal() as db:
+            active_count = db.scalar(select(func.count(TestCall.id)).where(TestCall.status.in_(ACTIVE_CALL_STATES))) or 0
+        if active_count:
+            error = quote_plus("Другой тестовый звонок уже выполняется")
+            return RedirectResponse(f"/calls?call_error={error}", status_code=303)
+        call_id = str(uuid.uuid4())
+        with SessionLocal.begin() as db:
+            db.add(TestCall(
+                id=call_id,
+                status="dialing",
+                phone_encrypted=encrypt_setting(settings["mango_test_phone"]),
+                model=settings["openai_realtime_model"],
+            ))
+        try:
+            originate_test_call(
+                settings["mango_test_phone"],
+                call_id,
+                settings.get("mango_outbound_number", ""),
+            )
+        except SipError as exc:
+            with SessionLocal.begin() as db:
+                record = db.get(TestCall, call_id)
+                record.status = "failed"
+                record.error = str(exc)
+                record.finished_at = datetime.now(UTC)
+            error = quote_plus(str(exc))
+            return RedirectResponse(f"/calls?call_error={error}", status_code=303)
+        audio_bridge.watch_dialing(call_id)
+    with SessionLocal.begin() as db:
+        db.add(AuditEvent(event_type="test_call_started", actor=user.username, details=call_id))
+    return RedirectResponse(f"/calls?call_started={quote_plus(call_id)}", status_code=303)
 
 
 @app.get("/mango/events/call")
