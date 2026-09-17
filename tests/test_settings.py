@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from jinja2 import Environment, FileSystemLoader
 
 from app.settings_catalog import SETTINGS_BY_KEY
+from app.sip import SipStatus
 
 
 def test_voice_robot_settings_are_available():
@@ -51,3 +52,24 @@ def test_settings_template_renders_sections_from_dicts():
     assert "ИИ-робот и тестовый контур" in html
     assert "Системный промпт" in html
     assert "textarea" in html
+
+
+def test_calls_template_renders_sip_registration_status():
+    environment = Environment(loader=FileSystemLoader("app/templates"), autoescape=True)
+    template = environment.get_template("calls.html")
+
+    html = template.render(
+        user=SimpleNamespace(username="admin"),
+        active="calls",
+        csrf_token="test-token",
+        events=[],
+        callback_configured=False,
+        sip_configured=True,
+        sip_status=SipStatus("registered", "Зарегистрирован", "mango-registration Registered", True),
+        sip_saved=None,
+        sip_error=None,
+    )
+
+    assert "Подключение Mango" in html
+    assert "Зарегистрирован" in html
+    assert "Применить и проверить" in html

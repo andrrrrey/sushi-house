@@ -1,0 +1,12 @@
+[Unit]
+Description=Sushi House SIP firewall rules
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/sushi-house-voice-robot/ops/sip-firewall.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -12,6 +12,7 @@ data/
 recordings/
 logs/
 backups/
+.runtime/
 
 # Python
 __pycache__/

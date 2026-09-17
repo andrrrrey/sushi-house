@@ -19,6 +19,7 @@ SETTINGS = (
     SettingDefinition("iiko_app_id", "App ID", "iikoCloud", "Идентификатор приложения", False),
     SettingDefinition("iiko_client_secret", "Client Secret", "iikoCloud", "Секрет приложения"),
     SettingDefinition("mango_sip_server", "SIP-сервер", "Mango Office", "Домен сервера Mango", False),
+    SettingDefinition("mango_sip_port", "SIP-порт", "Mango Office", "Порт регистрации: 5060 или 60000", False, default="5060", placeholder="5060", max_length=5),
     SettingDefinition("mango_sip_login", "SIP-логин", "Mango Office", "Учётная запись робота", False),
     SettingDefinition("mango_sip_password", "SIP-пароль", "Mango Office", "Пароль учётной записи"),
     SettingDefinition("mango_extension", "Внутренний номер", "Mango Office", "Номер робота", False),

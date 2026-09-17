@@ -1,0 +1,12 @@
+[general]
+enabled=yes
+webenabled=no
+port=5038
+bindaddr=0.0.0.0
+displayconnects=no
+
+[voice_robot]
+secret=${ASTERISK_AMI_SECRET}
+read=system,call,log,verbose,command,agent,user,config,dtmf,reporting,cdr,dialplan
+write=system,call,command,config,originate
+permit=172.16.0.0/255.240.0.0

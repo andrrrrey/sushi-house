@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
+import logging
 import os
 from urllib.parse import quote_plus
 
@@ -18,9 +19,11 @@ from app.mango import MangoEventError, parse_call_event, verify_signature
 from app.models import AuditEvent, IntegrationSetting, MangoCallEvent, User
 from app.security import decrypt_setting, encrypt_setting, get_csrf_token, hash_password, verify_csrf, verify_password
 from app.settings_catalog import SETTINGS, SETTINGS_BY_KEY
+from app.sip import SIP_REQUIRED_KEYS, SipError, apply_registration, registration_status
 
 
 templates = Jinja2Templates(directory="app/templates")
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -28,11 +31,18 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))
+    try:
+        sip_settings = load_settings(*SIP_REQUIRED_KEYS, "mango_sip_port", "mango_extension")
+        if all(sip_settings.get(key) for key in SIP_REQUIRED_KEYS):
+            status = apply_registration(sip_settings)
+            logger.info("Mango SIP startup status: %s", status.state)
+    except SipError as exc:
+        logger.warning("Mango SIP startup failed: %s", exc)
     yield
     engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.4.2", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.5.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -182,6 +192,7 @@ async def dashboard(request: Request):
         return user
     with SessionLocal() as db:
         configured = set(db.scalars(select(IntegrationSetting.key)).all())
+    sip_status = registration_status()
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html",
@@ -195,14 +206,18 @@ async def dashboard(request: Request):
             services=[
                 {"name": "Сервер", "state": "Работает", "tone": "ok", "meta": "FastAPI · PostgreSQL"},
                 {"name": "iikoCloud", "state": "Готов к проверке" if {"iiko_api_login", "iiko_app_id", "iiko_client_secret"}.issubset(configured) else "Ожидает настройки", "tone": "ok" if {"iiko_api_login", "iiko_app_id", "iiko_client_secret"}.issubset(configured) else "wait", "meta": "Чтение без изменений"},
-                {"name": "Mango SIP", "state": "Доступы сохранены" if {"mango_sip_server", "mango_sip_login", "mango_sip_password"}.issubset(configured) else "Ожидает настройки", "tone": "ok" if {"mango_sip_server", "mango_sip_login", "mango_sip_password"}.issubset(configured) else "wait", "meta": "Тестовый режим"},
+                {"name": "Mango SIP", "state": sip_status.label, "tone": "ok" if sip_status.registered else "wait", "meta": "PJSIP · входящие заблокированы"},
             ],
         ),
     )
 
 
 @app.get("/calls", response_class=HTMLResponse)
-async def calls_page(request: Request):
+async def calls_page(
+    request: Request,
+    sip_saved: str | None = None,
+    sip_error: str | None = None,
+):
     user = require_user(request)
     if isinstance(user, RedirectResponse):
         return user
@@ -220,6 +235,8 @@ async def calls_page(request: Request):
             "received_at": record.received_at.strftime("%d.%m.%Y %H:%M:%S"),
         })
     mango_settings = load_settings("mango_vpbx_api_key", "mango_vpbx_api_salt")
+    sip_settings = load_settings(*SIP_REQUIRED_KEYS)
+    sip_status = registration_status()
     return templates.TemplateResponse(
         request=request,
         name="calls.html",
@@ -229,8 +246,38 @@ async def calls_page(request: Request):
             active="calls",
             events=events,
             callback_configured=len(mango_settings) == 2,
+            sip_configured=all(sip_settings.get(key) for key in SIP_REQUIRED_KEYS),
+            sip_status=sip_status,
+            sip_saved=sip_saved,
+            sip_error=sip_error,
         ),
     )
+
+
+@app.get("/mango/sip/status")
+async def mango_sip_status(request: Request):
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    status = registration_status()
+    return {"state": status.state, "label": status.label, "detail": status.detail, "registered": status.registered}
+
+
+@app.post("/mango/sip/apply")
+async def mango_sip_apply(request: Request, csrf_token: str = Form(...)):
+    verify_csrf(request, csrf_token)
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    settings = load_settings(*SIP_REQUIRED_KEYS, "mango_sip_port", "mango_extension")
+    try:
+        status = apply_registration(settings)
+    except SipError as exc:
+        error = quote_plus(str(exc))
+        return RedirectResponse(f"/calls?sip_error={error}", status_code=303)
+    with SessionLocal.begin() as db:
+        db.add(AuditEvent(event_type="mango_sip_applied", actor=user.username, details=status.state))
+    return RedirectResponse(f"/calls?sip_saved={quote_plus(status.label)}", status_code=303)
 
 
 @app.get("/mango/events/call")

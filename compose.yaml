@@ -8,10 +8,17 @@ services:
       SESSION_SECRET: ${SESSION_SECRET}
       SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ASTERISK_AMI_HOST: asterisk
+      ASTERISK_AMI_PORT: 5038
+      ASTERISK_AMI_USER: voice_robot
+      ASTERISK_AMI_SECRET: ${ASTERISK_AMI_SECRET}
+      ASTERISK_DYNAMIC_CONFIG: /runtime/asterisk/pjsip_mango.conf
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:8000"
     depends_on:
       db:
+        condition: service_healthy
+      asterisk:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
@@ -19,6 +26,28 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+    networks:
+      - internal
+    volumes:
+      - ./.runtime/asterisk:/runtime/asterisk
+
+  asterisk:
+    build: ./asterisk
+    restart: unless-stopped
+    environment:
+      ASTERISK_AMI_SECRET: ${ASTERISK_AMI_SECRET}
+      PUBLIC_IP: ${PUBLIC_IP:-5.129.249.100}
+    ports:
+      - "${PUBLIC_IP:-5.129.249.100}:5060:5060/udp"
+      - "${PUBLIC_IP:-5.129.249.100}:10000-10100:10000-10100/udp"
+    volumes:
+      - ./.runtime/asterisk:/runtime/asterisk
+    healthcheck:
+      test: ["CMD", "asterisk", "-rx", "core show uptime"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks:
       - internal
 
