@@ -11,9 +11,9 @@
   <div class="settings-sections">
     {% for section in sections %}
     <section class="settings-group soft-card">
-      <div class="section-heading"><h2>{{ section.name }}</h2><span>{{ section.items|selectattr('configured')|list|length }}/{{ section.items|length }}</span></div>
+      <div class="section-heading"><h2>{{ section['name'] }}</h2><span>{{ section['items']|selectattr('configured')|list|length }}/{{ section['items']|length }}</span></div>
       <div class="settings-list">
-        {% for item in section.items %}
+        {% for item in section['items'] %}
         <form method="post" action="/settings/{{ item.definition.key }}" class="setting-row {{ 'setting-row-multiline' if item.definition.multiline else '' }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="setting-copy"><label for="{{ item.definition.key }}">{{ item.definition.label }}</label><small>{{ item.definition.hint }}</small></div>
