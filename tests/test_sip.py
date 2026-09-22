@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.sip import AmiClient, SipError, normalize_server, render_pjsip_config, write_pjsip_config
+from app.sip import AmiClient, SipError, normalize_server, originate_test_call, render_pjsip_config, write_pjsip_config
 
 
 class SipConfigTests(unittest.TestCase):
@@ -58,6 +58,28 @@ class SipConfigTests(unittest.TestCase):
         client.action = lambda *args, **kwargs: ["Response: Error", "Message: Originate failed"]
         with self.assertRaises(SipError):
             client.originate("PJSIP/test", "AudioSocket", "data", "+73012555777")
+
+    def test_test_call_removes_plus_for_mango_sip(self):
+        import app.sip as sip
+
+        captured = {}
+        original = sip.ami_client
+        client = AmiClient("asterisk", 5038, "user", "secret")
+        client.originate = lambda channel, application, data, caller_id: captured.update(
+            channel=channel, application=application, data=data, caller_id=caller_id
+        )
+        sip.ami_client = lambda: client
+        try:
+            originate_test_call(
+                "+79991234567",
+                "00000000-0000-0000-0000-000000000001",
+                "+73012555777",
+            )
+        finally:
+            sip.ami_client = original
+
+        self.assertEqual(captured["channel"], "PJSIP/79991234567@mango-endpoint")
+        self.assertEqual(captured["caller_id"], "73012555777")
 
 
 if __name__ == "__main__":
