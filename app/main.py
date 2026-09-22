@@ -50,7 +50,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.6.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.7.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -114,15 +114,17 @@ def load_settings(*keys: str) -> dict[str, str]:
 
 def effective_voice_settings() -> dict[str, str]:
     keys = (
-        "openai_api_key",
-        "openai_realtime_model",
-        "openai_voice",
-        "openai_system_prompt",
+        "yandex_api_key",
+        "yandex_folder_id",
+        "yandex_gpt_model",
+        "yandex_voice",
+        "yandex_voice_emotion",
+        "yandex_system_prompt",
         "mango_test_phone",
         "mango_outbound_number",
     )
     values = load_settings(*keys)
-    for key in ("openai_realtime_model", "openai_voice", "openai_system_prompt"):
+    for key in ("yandex_gpt_model", "yandex_voice", "yandex_voice_emotion", "yandex_system_prompt"):
         values.setdefault(key, SETTINGS_BY_KEY[key].default)
     return values
 
@@ -269,8 +271,10 @@ async def calls_page(
     sip_status = registration_status()
     voice_settings = effective_voice_settings()
     missing_voice_settings = []
-    if not voice_settings.get("openai_api_key"):
-        missing_voice_settings.append("OpenAI API Key")
+    if not voice_settings.get("yandex_api_key"):
+        missing_voice_settings.append("Yandex Cloud API Key")
+    if not voice_settings.get("yandex_folder_id"):
+        missing_voice_settings.append("Yandex Folder ID")
     if not voice_settings.get("mango_test_phone"):
         missing_voice_settings.append("тестовый номер")
     test_calls = []
@@ -310,8 +314,7 @@ async def calls_page(
             call_started=call_started,
             call_error=call_error,
             test_phone=mask_phone(voice_settings["mango_test_phone"]) if voice_settings.get("mango_test_phone") else "—",
-            realtime_model=voice_settings["openai_realtime_model"],
-            realtime_ready=not missing_voice_settings,
+            voice_model=voice_settings["yandex_gpt_model"],
             test_call_ready=sip_status.registered and not missing_voice_settings,
             test_call_blockers=missing_voice_settings + ([] if sip_status.registered else ["регистрация Mango SIP"]),
             test_calls=test_calls,
@@ -356,9 +359,9 @@ async def start_test_call(request: Request, csrf_token: str = Form(...)):
         error = quote_plus("Mango SIP ещё не зарегистрирован: тестовый звонок не запущен")
         return RedirectResponse(f"/calls?call_error={error}", status_code=303)
     settings = effective_voice_settings()
-    missing = [key for key in ("openai_api_key", "mango_test_phone") if not settings.get(key)]
+    missing = [key for key in ("yandex_api_key", "yandex_folder_id", "mango_test_phone") if not settings.get(key)]
     if missing:
-        error = quote_plus("Сначала сохраните OpenAI API Key и тестовый номер в настройках")
+        error = quote_plus("Сначала сохраните Yandex Cloud API Key, Folder ID и тестовый номер в настройках")
         return RedirectResponse(f"/calls?call_error={error}", status_code=303)
     async with test_call_start_lock:
         with SessionLocal() as db:
@@ -372,7 +375,7 @@ async def start_test_call(request: Request, csrf_token: str = Form(...)):
                 id=call_id,
                 status="dialing",
                 phone_encrypted=encrypt_setting(settings["mango_test_phone"]),
-                model=settings["openai_realtime_model"],
+                model=settings["yandex_gpt_model"],
             ))
         try:
             originate_test_call(
@@ -561,6 +564,9 @@ async def update_setting(
         return RedirectResponse(f"/settings?error={quote_plus('Слишком длинное значение')}", status_code=303)
     if setting_key == "mango_test_phone" and (not value.startswith("+") or not value[1:].isdigit() or not 11 <= len(value[1:]) <= 15):
         error = quote_plus("Тестовый номер нужен в формате +79991234567")
+        return RedirectResponse(f"/settings?error={error}", status_code=303)
+    if setting_key == "yandex_folder_id" and not all(character.isalnum() or character in "-_" for character in value):
+        error = quote_plus("Yandex Folder ID содержит недопустимые символы")
         return RedirectResponse(f"/settings?error={error}", status_code=303)
     with SessionLocal.begin() as db:
         record = db.scalar(select(IntegrationSetting).where(IntegrationSetting.key == setting_key))

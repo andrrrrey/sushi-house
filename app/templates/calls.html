@@ -28,7 +28,7 @@
   </section>
   <section class="soft-card result-card test-call-card">
     <div class="section-heading">
-      <div><span>OpenAI Realtime · {{ realtime_model }}</span><h2>Безопасный тестовый звонок</h2></div>
+      <div><span>Yandex SpeechKit + YandexGPT · {{ voice_model }}</span><h2>Безопасный тестовый звонок</h2></div>
       <form method="post" action="/calls/test/start">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button class="cream-button" type="submit" {{ 'disabled' if not test_call_ready else '' }}>Запустить звонок</button>
@@ -36,7 +36,7 @@
     </div>
     <div class="sip-summary test-call-summary">
       <div><span>Разрешённый номер</span><strong>{{ test_phone }}</strong></div>
-      <div><span>Аудиомост</span><strong>PCM 8 ↔ 24 кГц</strong></div>
+      <div><span>Аудиомост</span><strong>PCM 8 кГц</strong></div>
       <div><span>iiko</span><strong>Только чтение</strong></div>
       <div><span>Одновременно</span><strong>1 звонок</strong></div>
     </div>
@@ -61,7 +61,7 @@
       {% endfor %}
     </div>
     {% else %}
-    <div class="empty-state"><strong>Тестовых звонков пока не было</strong><p>После регистрации Mango и заполнения настроек здесь появятся состояния звонка и расшифровка речи робота.</p></div>
+    <div class="empty-state"><strong>Тестовых звонков пока не было</strong><p>После регистрации Mango и заполнения настроек Yandex здесь появятся состояния звонка и расшифровка диалога.</p></div>
     {% endif %}
   </section>
   <section class="soft-card result-card">

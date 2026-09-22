@@ -1,18 +1,15 @@
 import asyncio
 from array import array
-import base64
+from collections import deque
 from contextlib import suppress
 from datetime import UTC, datetime
-import hashlib
-import json
 import logging
 import os
 import struct
-from urllib.parse import quote
 import uuid
 
+import httpx
 from sqlalchemy import select
-import websockets
 
 from app.db import SessionLocal
 from app.models import IntegrationSetting, TestCall
@@ -25,11 +22,12 @@ logger = logging.getLogger(__name__)
 AUDIO_TYPE_PCM_8K = 0x10
 AUDIO_FRAME_BYTES = 320
 ACTIVE_CALL_STATES = ("dialing", "connected")
-OPENAI_REQUIRED_KEYS = (
-    "openai_api_key",
-    "openai_realtime_model",
-    "openai_voice",
-    "openai_system_prompt",
+YANDEX_REQUIRED_KEYS = (
+    "yandex_api_key",
+    "yandex_folder_id",
+    "yandex_gpt_model",
+    "yandex_voice",
+    "yandex_system_prompt",
 )
 
 
@@ -43,72 +41,70 @@ def audio_socket_packet(message_type: int, payload: bytes = b"") -> bytes:
     return bytes((message_type,)) + struct.pack(">H", len(payload)) + payload
 
 
-def upsample_pcm_8k_to_24k(payload: bytes) -> bytes:
-    """Convert little-endian mono PCM16 from 8 kHz to 24 kHz."""
+def pcm_rms(payload: bytes) -> int:
     samples = array("h")
     samples.frombytes(payload[: len(payload) - (len(payload) % 2)])
     if not samples:
-        return b""
-    output = array("h")
-    for index, current in enumerate(samples):
-        following = samples[index + 1] if index + 1 < len(samples) else current
-        output.extend((current, round((2 * current + following) / 3), round((current + 2 * following) / 3)))
-    return output.tobytes()
+        return 0
+    return round((sum(sample * sample for sample in samples) / len(samples)) ** 0.5)
 
 
-class Pcm24kTo8k:
-    def __init__(self):
-        self._remainder = bytearray()
+class UtteranceDetector:
+    """Local VAD for 20 ms, 8 kHz PCM16 telephony frames."""
 
-    def convert(self, payload: bytes) -> bytes:
-        self._remainder.extend(payload)
-        usable_bytes = len(self._remainder) - (len(self._remainder) % 6)
-        if not usable_bytes:
-            return b""
-        samples = array("h")
-        samples.frombytes(bytes(self._remainder[:usable_bytes]))
-        del self._remainder[:usable_bytes]
-        output = array("h")
-        for index in range(0, len(samples), 3):
-            output.append(round(sum(samples[index:index + 3]) / 3))
-        return output.tobytes()
+    def __init__(
+        self,
+        threshold: int = 350,
+        silence_frames: int = 35,
+        minimum_frames: int = 15,
+        maximum_frames: int = 1250,
+        pre_roll_frames: int = 10,
+    ):
+        self.threshold = threshold
+        self.silence_frames = silence_frames
+        self.minimum_frames = minimum_frames
+        self.maximum_frames = maximum_frames
+        self.pre_roll = deque(maxlen=pre_roll_frames)
+        self.frames: list[bytes] = []
+        self.trailing_silence = 0
+        self.started = False
+
+    def reset(self) -> None:
+        self.pre_roll.clear()
+        self.frames.clear()
+        self.trailing_silence = 0
+        self.started = False
+
+    def feed(self, payload: bytes) -> bytes | None:
+        loud = pcm_rms(payload) >= self.threshold
+        if not self.started:
+            self.pre_roll.append(payload)
+            if not loud:
+                return None
+            self.started = True
+            self.frames = list(self.pre_roll)
+            self.trailing_silence = 0
+            return None
+
+        self.frames.append(payload)
+        self.trailing_silence = 0 if loud else self.trailing_silence + 1
+        complete = (
+            len(self.frames) >= self.maximum_frames
+            or (len(self.frames) >= self.minimum_frames and self.trailing_silence >= self.silence_frames)
+        )
+        if not complete:
+            return None
+        utterance = b"".join(self.frames)
+        self.reset()
+        return utterance
 
 
-def build_session_update(model: str, voice: str, instructions: str) -> dict:
-    return {
-        "type": "session.update",
-        "session": {
-            "type": "realtime",
-            "model": model,
-            "output_modalities": ["audio"],
-            "instructions": instructions,
-            "audio": {
-                "input": {
-                    "format": {"type": "audio/pcm", "rate": 24000},
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 600,
-                        "create_response": True,
-                        "interrupt_response": True,
-                    },
-                },
-                "output": {
-                    "format": {"type": "audio/pcm", "rate": 24000},
-                    "voice": voice,
-                },
-            },
-        },
-    }
-
-
-def load_realtime_settings() -> dict[str, str]:
-    keys = (*OPENAI_REQUIRED_KEYS, "mango_test_phone")
+def load_voice_settings() -> dict[str, str]:
+    keys = (*YANDEX_REQUIRED_KEYS, "yandex_voice_emotion", "mango_test_phone")
     with SessionLocal() as db:
         records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(keys))).all()
     values = {record.key: decrypt_setting(record.encrypted_value) for record in records}
-    for key in ("openai_realtime_model", "openai_voice", "openai_system_prompt"):
+    for key in ("yandex_gpt_model", "yandex_voice", "yandex_voice_emotion", "yandex_system_prompt"):
         values.setdefault(key, SETTINGS_BY_KEY[key].default)
     return values
 
@@ -133,6 +129,87 @@ def append_transcript(call_id: str, speaker: str, text: str) -> None:
         prefix = "Робот" if speaker == "assistant" else "Абонент"
         line = f"{prefix}: {text}"
         record.transcript = f"{record.transcript}\n{line}".strip()[-12000:]
+
+
+class YandexVoiceClient:
+    STT_URL = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
+    TTS_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
+    LLM_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+
+    def __init__(self, settings: dict[str, str], http_client: httpx.AsyncClient | None = None):
+        self.api_key = settings["yandex_api_key"]
+        self.folder_id = settings["yandex_folder_id"]
+        self.model = settings["yandex_gpt_model"]
+        self.voice = settings["yandex_voice"]
+        self.emotion = settings.get("yandex_voice_emotion", "good")
+        self.system_prompt = settings["yandex_system_prompt"]
+        self.http = http_client or httpx.AsyncClient(
+            headers={"Authorization": f"Api-Key {self.api_key}"},
+            timeout=httpx.Timeout(30.0, connect=10.0),
+        )
+
+    async def close(self) -> None:
+        await self.http.aclose()
+
+    @staticmethod
+    def _raise(response: httpx.Response, service: str) -> None:
+        if response.is_success:
+            return
+        try:
+            body = response.json()
+            raw_error = body.get("error") or {}
+            message = body.get("message") or body.get("error_message")
+            if not message and isinstance(raw_error, dict):
+                message = raw_error.get("message")
+        except (ValueError, AttributeError):
+            message = response.text[:300]
+        raise RealtimeBridgeError(f"{service}: HTTP {response.status_code}: {message or 'ошибка API'}")
+
+    async def recognize(self, pcm_8k: bytes) -> str:
+        response = await self.http.post(
+            self.STT_URL,
+            params={
+                "lang": "ru-RU",
+                "topic": "general",
+                "format": "lpcm",
+                "sampleRateHertz": "8000",
+            },
+            content=pcm_8k,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        self._raise(response, "Yandex SpeechKit STT")
+        return str(response.json().get("result") or "").strip()
+
+    async def complete(self, history: list[dict[str, str]]) -> str:
+        model_uri = self.model if self.model.startswith("gpt://") else f"gpt://{self.folder_id}/{self.model}"
+        response = await self.http.post(
+            self.LLM_URL,
+            json={
+                "modelUri": model_uri,
+                "completionOptions": {"stream": False, "temperature": 0.2, "maxTokens": "220"},
+                "messages": [{"role": "system", "text": self.system_prompt}, *history[-12:]],
+            },
+        )
+        self._raise(response, "YandexGPT")
+        try:
+            return str(response.json()["result"]["alternatives"][0]["message"]["text"]).strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RealtimeBridgeError("YandexGPT вернул ответ неизвестного формата") from exc
+
+    async def synthesize(self, text: str) -> bytes:
+        data = {
+            "text": text[:5000],
+            "lang": "ru-RU",
+            "voice": self.voice,
+            "speed": "1.0",
+            "format": "lpcm",
+            "sampleRateHertz": "8000",
+        }
+        if self.emotion:
+            data["emotion"] = self.emotion
+        response = await self.http.post(self.TTS_URL, data=data)
+        self._raise(response, "Yandex SpeechKit TTS")
+        return response.content
 
 
 class AudioBridgeManager:
@@ -187,24 +264,24 @@ class AudioBridgeManager:
         try:
             message_type, payload = await self._read_packet(reader)
             if message_type != 0x01 or len(payload) != 16:
-                raise RealtimeBridgeError("AudioSocket did not provide a valid call UUID")
+                raise RealtimeBridgeError("AudioSocket не передал корректный UUID звонка")
             call_id = str(uuid.UUID(bytes=payload))
             with SessionLocal() as db:
                 record = db.get(TestCall, call_id)
                 allowed = bool(record and record.status == "dialing")
             if not allowed:
-                raise RealtimeBridgeError("Unknown or inactive test call")
+                raise RealtimeBridgeError("Неизвестный или уже завершённый тестовый звонок")
             watchdog = self._watchdogs.pop(call_id, None)
             if watchdog:
                 watchdog.cancel()
             update_test_call(call_id, status="connected", connected_at=datetime.now(UTC), error="")
-            await self._run_openai_bridge(call_id, reader, writer)
+            await self._run_yandex_bridge(call_id, reader, writer)
             update_test_call(call_id, status="completed", finished_at=datetime.now(UTC))
         except asyncio.IncompleteReadError:
             if call_id:
                 update_test_call(call_id, status="completed", finished_at=datetime.now(UTC))
         except Exception as exc:
-            logger.warning("Realtime bridge failed for %s: %s", call_id or "unknown", exc)
+            logger.warning("Yandex voice bridge failed for %s: %s", call_id or "unknown", exc)
             if call_id:
                 update_test_call(
                     call_id,
@@ -217,123 +294,56 @@ class AudioBridgeManager:
             with suppress(Exception):
                 await writer.wait_closed()
 
-    async def _run_openai_bridge(
+    async def _run_yandex_bridge(
         self,
         call_id: str,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        settings = load_realtime_settings()
-        missing = [key for key in OPENAI_REQUIRED_KEYS if not settings.get(key)]
+        settings = load_voice_settings()
+        missing = [key for key in YANDEX_REQUIRED_KEYS if not settings.get(key)]
         if missing:
-            raise RealtimeBridgeError("Не заполнены настройки OpenAI Realtime")
-        model = settings["openai_realtime_model"]
-        url = f"wss://api.openai.com/v1/realtime?model={quote(model, safe='-._')}"
-        safety_id = hashlib.sha256(f"sushi-house-test:{call_id}".encode()).hexdigest()
-        headers = {
-            "Authorization": f"Bearer {settings['openai_api_key']}",
-            "OpenAI-Safety-Identifier": safety_id,
-        }
-        async with websockets.connect(
-            url,
-            additional_headers=headers,
-            open_timeout=15,
-            close_timeout=5,
-            max_size=8 * 1024 * 1024,
-        ) as websocket:
-            await websocket.send(json.dumps(build_session_update(
-                model,
-                settings["openai_voice"],
-                settings["openai_system_prompt"],
-            )))
-            await self._wait_until_ready(websocket)
-            await websocket.send(json.dumps({
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{
-                        "type": "input_text",
-                        "text": "Системное событие: абонент ответил на тестовый звонок. Начни разговор первым.",
-                    }],
-                },
-            }))
-            await websocket.send(json.dumps({"type": "response.create"}))
-            outgoing_audio: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=100)
+            raise RealtimeBridgeError("Не заполнены настройки Yandex Cloud")
+        client = YandexVoiceClient(settings)
+        history: list[dict[str, str]] = []
+        detector = UtteranceDetector()
+        try:
+            greeting = "Здравствуйте! Это тестовый звонок Sushi House. Подтвердите, пожалуйста, ваш заказ."
+            append_transcript(call_id, "assistant", greeting)
+            await self._play_pcm(writer, await client.synthesize(greeting))
             async with asyncio.timeout(5 * 60):
-                tasks = [
-                    asyncio.create_task(self._asterisk_to_openai(reader, websocket)),
-                    asyncio.create_task(self._openai_to_queue(call_id, websocket, outgoing_audio)),
-                    asyncio.create_task(self._queue_to_asterisk(writer, outgoing_audio)),
-                ]
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
-                for task in pending:
-                    with suppress(asyncio.CancelledError):
-                        await task
-                for task in done:
-                    task.result()
+                while True:
+                    message_type, payload = await self._read_packet(reader)
+                    if message_type in (0x00, 0xFF):
+                        return
+                    if message_type != AUDIO_TYPE_PCM_8K or not payload:
+                        continue
+                    utterance = detector.feed(payload)
+                    if utterance is None:
+                        continue
+                    recognized = await client.recognize(utterance)
+                    if not recognized:
+                        continue
+                    append_transcript(call_id, "user", recognized)
+                    history.append({"role": "user", "text": recognized})
+                    answer = await client.complete(history)
+                    if not answer:
+                        continue
+                    history.append({"role": "assistant", "text": answer})
+                    append_transcript(call_id, "assistant", answer)
+                    await self._play_pcm(writer, await client.synthesize(answer))
+        finally:
+            await client.close()
 
-    async def _wait_until_ready(self, websocket) -> None:
-        for _ in range(20):
-            event = json.loads(await asyncio.wait_for(websocket.recv(), timeout=10))
-            if event.get("type") == "session.updated":
-                return
-            if event.get("type") == "error":
-                error = event.get("error") or {}
-                raise RealtimeBridgeError(f"OpenAI Realtime: {error.get('message', 'ошибка сессии')}")
-        raise RealtimeBridgeError("OpenAI Realtime не подтвердил настройки сессии")
-
-    async def _asterisk_to_openai(self, reader: asyncio.StreamReader, websocket) -> None:
-        while True:
-            message_type, payload = await self._read_packet(reader)
-            if message_type in (0x00, 0xFF):
-                return
-            if message_type != AUDIO_TYPE_PCM_8K or not payload:
-                continue
-            pcm_24k = upsample_pcm_8k_to_24k(payload)
-            await websocket.send(json.dumps({
-                "type": "input_audio_buffer.append",
-                "audio": base64.b64encode(pcm_24k).decode(),
-            }))
-
-    async def _openai_to_queue(self, call_id: str, websocket, queue: asyncio.Queue) -> None:
-        assistant_transcript = []
-        async for raw_message in websocket:
-            event = json.loads(raw_message)
-            event_type = event.get("type", "")
-            if event_type == "response.output_audio.delta":
-                await queue.put(base64.b64decode(event.get("delta", ""), validate=True))
-            elif event_type == "response.output_audio_transcript.delta":
-                assistant_transcript.append(str(event.get("delta") or ""))
-            elif event_type == "response.output_audio_transcript.done":
-                transcript = str(event.get("transcript") or "") or "".join(assistant_transcript)
-                append_transcript(call_id, "assistant", transcript)
-                assistant_transcript.clear()
-            elif event_type == "conversation.item.input_audio_transcription.completed":
-                append_transcript(call_id, "user", str(event.get("transcript") or ""))
-            elif event_type == "input_audio_buffer.speech_started":
-                self._clear_queue(queue)
-            elif event_type == "error":
-                error = event.get("error") or {}
-                raise RealtimeBridgeError(f"OpenAI Realtime: {error.get('message', 'ошибка потока')}")
-        await queue.put(None)
-
-    async def _queue_to_asterisk(self, writer: asyncio.StreamWriter, queue: asyncio.Queue) -> None:
-        converter = Pcm24kTo8k()
-        buffer = bytearray()
-        while True:
-            chunk = await queue.get()
-            if chunk is None:
-                return
-            buffer.extend(converter.convert(chunk))
-            while len(buffer) >= AUDIO_FRAME_BYTES:
-                frame = bytes(buffer[:AUDIO_FRAME_BYTES])
-                del buffer[:AUDIO_FRAME_BYTES]
-                writer.write(audio_socket_packet(AUDIO_TYPE_PCM_8K, frame))
-                await writer.drain()
-                await asyncio.sleep(0.02)
+    @staticmethod
+    async def _play_pcm(writer: asyncio.StreamWriter, pcm: bytes) -> None:
+        for offset in range(0, len(pcm), AUDIO_FRAME_BYTES):
+            frame = pcm[offset:offset + AUDIO_FRAME_BYTES]
+            if len(frame) < AUDIO_FRAME_BYTES:
+                frame += b"\x00" * (AUDIO_FRAME_BYTES - len(frame))
+            writer.write(audio_socket_packet(AUDIO_TYPE_PCM_8K, frame))
+            await writer.drain()
+            await asyncio.sleep(0.02)
 
     @staticmethod
     async def _read_packet(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -341,14 +351,6 @@ class AudioBridgeManager:
         length = struct.unpack(">H", header[1:])[0]
         payload = await reader.readexactly(length) if length else b""
         return header[0], payload
-
-    @staticmethod
-    def _clear_queue(queue: asyncio.Queue) -> None:
-        while True:
-            try:
-                queue.get_nowait()
-            except asyncio.QueueEmpty:
-                return
 
 
 audio_bridge = AudioBridgeManager(

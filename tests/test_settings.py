@@ -8,10 +8,12 @@ from app.sip import SipStatus
 
 def test_voice_robot_settings_are_available():
     expected = {
-        "openai_api_key",
-        "openai_realtime_model",
-        "openai_voice",
-        "openai_system_prompt",
+        "yandex_api_key",
+        "yandex_folder_id",
+        "yandex_gpt_model",
+        "yandex_voice",
+        "yandex_voice_emotion",
+        "yandex_system_prompt",
         "mango_test_phone",
     }
 
@@ -19,18 +21,19 @@ def test_voice_robot_settings_are_available():
 
 
 def test_prompt_is_multiline_and_defaults_are_safe_for_test_mode():
-    prompt = SETTINGS_BY_KEY["openai_system_prompt"]
+    prompt = SETTINGS_BY_KEY["yandex_system_prompt"]
 
     assert prompt.multiline is True
     assert "не меняет заказ" in prompt.default
-    assert SETTINGS_BY_KEY["openai_realtime_model"].default == "gpt-realtime-2"
-    assert SETTINGS_BY_KEY["openai_voice"].default == "marin"
+    assert SETTINGS_BY_KEY["yandex_gpt_model"].default == "yandexgpt/latest"
+    assert SETTINGS_BY_KEY["yandex_voice"].default == "alena"
+    assert SETTINGS_BY_KEY["yandex_voice_emotion"].default == "good"
 
 
 def test_settings_template_renders_sections_from_dicts():
     environment = Environment(loader=FileSystemLoader("app/templates"), autoescape=True)
     template = environment.get_template("settings.html")
-    definition = SETTINGS_BY_KEY["openai_system_prompt"]
+    definition = SETTINGS_BY_KEY["yandex_system_prompt"]
 
     html = template.render(
         user=SimpleNamespace(username="admin"),
@@ -71,8 +74,7 @@ def test_calls_template_renders_sip_registration_status():
         call_started=None,
         call_error=None,
         test_phone="••••4567",
-        realtime_model="gpt-realtime-2",
-        realtime_ready=True,
+        voice_model="yandexgpt/latest",
         test_call_ready=True,
         test_call_blockers=[],
         test_calls=[],
@@ -83,3 +85,4 @@ def test_calls_template_renders_sip_registration_status():
     assert "Применить и проверить" in html
     assert "Запустить звонок" in html
     assert "Только чтение" in html
+    assert "Yandex SpeechKit + YandexGPT" in html
