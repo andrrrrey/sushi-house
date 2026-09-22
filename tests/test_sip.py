@@ -78,7 +78,7 @@ class SipConfigTests(unittest.TestCase):
         finally:
             sip.ami_client = original
 
-        self.assertEqual(captured["channel"], "PJSIP/79991234567@mango-endpoint")
+        self.assertEqual(captured["channel"], "PJSIP/89991234567@mango-endpoint")
         self.assertEqual(captured["caller_id"], "73012555777")
 
 

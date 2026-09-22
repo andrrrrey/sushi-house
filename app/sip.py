@@ -249,7 +249,7 @@ def apply_registration(settings: dict[str, str]) -> SipStatus:
 def originate_test_call(phone: str, call_id: str, caller_id: str) -> None:
     if not PHONE_PATTERN.fullmatch(phone):
         raise SipError("Тестовый номер должен быть в международном формате")
-    dialed_phone = phone.removeprefix("+")
+    dialed_phone = f"8{phone[2:]}" if phone.startswith("+7") else phone.removeprefix("+")
     try:
         uuid.UUID(call_id)
     except ValueError as exc:
@@ -257,7 +257,7 @@ def originate_test_call(phone: str, call_id: str, caller_id: str) -> None:
     normalized_caller_id = caller_id.strip()
     if normalized_caller_id and not PHONE_PATTERN.fullmatch(normalized_caller_id):
         raise SipError("Некорректный исходящий Caller ID")
-    sip_caller_id = normalized_caller_id.removeprefix("+") if normalized_caller_id else dialed_phone
+    sip_caller_id = normalized_caller_id.removeprefix("+") if normalized_caller_id else phone.removeprefix("+")
     ami_client().originate(
         channel=f"PJSIP/{dialed_phone}@mango-endpoint",
         application="AudioSocket",
