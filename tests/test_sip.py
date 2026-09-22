@@ -22,7 +22,7 @@ class SipConfigTests(unittest.TestCase):
         self.assertIn("dtmf_mode=rfc4733", config)
         self.assertIn("context=mango-inbound-locked", config)
         self.assertIn("expiration=180", config)
-        self.assertIn("from_user=225", config)
+        self.assertIn("from_user=123/225", config)
 
     def test_rejects_configuration_injection(self):
         with self.assertRaises(SipError):
