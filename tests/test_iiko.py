@@ -22,7 +22,7 @@ class SpokenOrderTests(unittest.TestCase):
         ]
         self.assertEqual(
             join_spoken_list(values),
-            "Филадельфия; Палочки — три порции; и Соевый соус — пять порций",
+            "Филадельфия; три комплекта палочек; и пять порций соевого соуса",
         )
 
 

@@ -70,7 +70,13 @@ class IikoOrderItem:
             quantity = int(self.amount)
             quantity_text = QUANTITY_WORDS.get(quantity, str(quantity))
             portion = "порции" if quantity % 10 in (2, 3, 4) and quantity % 100 not in (12, 13, 14) else "порций"
-            value = f"{name} — {quantity_text} {portion}"
+            if name.casefold() == "палочки":
+                unit = "комплекта" if quantity % 10 in (2, 3, 4) and quantity % 100 not in (12, 13, 14) else "комплектов"
+                value = f"{quantity_text} {unit} палочек"
+            elif name.casefold() == "соевый соус":
+                value = f"{quantity_text} {portion} соевого соуса"
+            else:
+                value = f"{name} — {quantity_text} {portion}"
         else:
             quantity_text = str(self.amount).replace(".", ",")
             value = f"{name} — {quantity_text} порции"
@@ -102,7 +108,7 @@ class IikoOrderSnapshot:
     def greeting(self) -> str:
         delivery = f"Доставить нужно по адресу: {self.address}." if self.address else "Адрес доставки в iiko не указан."
         return (
-            f"Здравствуйте! Это Sushi House. Хочу уточнить ваш заказ номер {self.number}. "
+            f"Здравствуйте! Это Суши Хаус. Хочу уточнить ваш заказ номер {self.number}. "
             f"У вас: {self.spoken_items()}. {self.spoken_total()} {delivery} "
             "Подскажите, пожалуйста, всё верно?"
         )
