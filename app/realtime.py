@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import logging
 import json
 import os
+import re
 import struct
 import uuid
 
@@ -15,6 +16,7 @@ import httpx
 from sqlalchemy import select
 
 from app.db import SessionLocal
+from app.iiko import IikoOrderSnapshot
 from app.models import IntegrationSetting, TestCall
 from app.security import decrypt_setting
 from app.settings_catalog import SETTINGS_BY_KEY
@@ -52,14 +54,35 @@ def pcm_rms(payload: bytes) -> int:
     return round((sum(sample * sample for sample in samples) / len(samples)) ** 0.5)
 
 
+def downsample_pcm_16k_to_8k(payload: bytes) -> bytes:
+    samples = array("h")
+    samples.frombytes(payload[: len(payload) - (len(payload) % 4)])
+    output = array("h")
+    for index in range(0, len(samples), 2):
+        output.append(round((samples[index] + samples[index + 1]) / 2))
+    return output.tobytes()
+
+
+def fast_confirmation_response(text: str) -> str | None:
+    normalized = " ".join(text.lower().replace("ё", "е").split())
+    words = set(re.findall(r"[\w-]+", normalized))
+    negative_phrases = ("не подтверждаю", "неверно", "не верно", "ошибка")
+    positive_phrases = ("подтверждаю", "все верно", "все правильно")
+    if "нет" in words or any(phrase in normalized for phrase in negative_phrases):
+        return "Понял. Скажите, пожалуйста, что именно в заказе или адресе указано неверно."
+    if {"да", "верно"} & words or any(phrase in normalized for phrase in positive_phrases):
+        return "Спасибо. Ваше подтверждение зафиксировано только в тестовом журнале и не отправлено в iiko."
+    return None
+
+
 class UtteranceDetector:
     """Local VAD for 20 ms, 8 kHz PCM16 telephony frames."""
 
     def __init__(
         self,
         threshold: int = 350,
-        silence_frames: int = 35,
-        minimum_frames: int = 15,
+        silence_frames: int = 25,
+        minimum_frames: int = 10,
         maximum_frames: int = 1250,
         pre_roll_frames: int = 10,
     ):
@@ -139,14 +162,19 @@ class YandexVoiceClient:
     TTS_URL = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
     LLM_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
-    def __init__(self, settings: dict[str, str], http_client: httpx.AsyncClient | None = None):
+    def __init__(
+        self,
+        settings: dict[str, str],
+        http_client: httpx.AsyncClient | None = None,
+        extra_instructions: str = "",
+    ):
         self.api_key = settings["yandex_api_key"]
         self.folder_id = settings["yandex_folder_id"]
         self.model = settings["yandex_gpt_model"]
         self.voice = settings["yandex_voice"]
         self.emotion = settings.get("yandex_voice_emotion", "friendly")
         self.speed = settings.get("yandex_voice_speed", "1.0")
-        self.system_prompt = settings["yandex_system_prompt"]
+        self.system_prompt = f"{settings['yandex_system_prompt']}\n\n{extra_instructions}".strip()
         self.http = http_client or httpx.AsyncClient(
             headers={"Authorization": f"Api-Key {self.api_key}"},
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -190,7 +218,7 @@ class YandexVoiceClient:
             self.LLM_URL,
             json={
                 "modelUri": model_uri,
-                "completionOptions": {"stream": False, "temperature": 0.2, "maxTokens": "220"},
+                "completionOptions": {"stream": False, "temperature": 0.1, "maxTokens": "120"},
                 "messages": [{"role": "system", "text": self.system_prompt}, *history[-12:]],
             },
         )
@@ -201,7 +229,7 @@ class YandexVoiceClient:
             raise RealtimeBridgeError("YandexGPT вернул ответ неизвестного формата") from exc
 
     async def synthesize(self, text: str) -> bytes:
-        hints = [{"voice": self.voice}, {"speed": self.speed}]
+        hints = [{"voice": self.voice}, {"speed": self.speed}, {"volume": "0.85"}]
         if self.emotion and self.emotion != "auto":
             hints.append({"role": self.emotion})
         response = await self.http.post(
@@ -210,9 +238,9 @@ class YandexVoiceClient:
                 "text": text[:5000],
                 "hints": hints,
                 "outputAudioSpec": {
-                    "rawAudio": {"audioEncoding": "LINEAR16_PCM", "sampleRateHertz": "8000"},
+                    "rawAudio": {"audioEncoding": "LINEAR16_PCM", "sampleRateHertz": "16000"},
                 },
-                "loudnessNormalizationType": "LUFS",
+                "loudnessNormalizationType": "MAX_PEAK",
                 "unsafeMode": True,
             },
         )
@@ -238,7 +266,7 @@ class YandexVoiceClient:
                     raise RealtimeBridgeError("Yandex SpeechKit TTS вернул повреждённый аудиофрагмент") from exc
         if not chunks:
             raise RealtimeBridgeError("Yandex SpeechKit TTS не вернул аудио")
-        return b"".join(chunks)
+        return downsample_pcm_16k_to_8k(b"".join(chunks))
 
 
 class AudioBridgeManager:
@@ -247,6 +275,7 @@ class AudioBridgeManager:
         self.port = port
         self._server: asyncio.AbstractServer | None = None
         self._watchdogs: dict[str, asyncio.Task] = {}
+        self._orders: dict[str, IikoOrderSnapshot] = {}
 
     async def start(self) -> None:
         with SessionLocal.begin() as db:
@@ -262,9 +291,16 @@ class AudioBridgeManager:
         for task in self._watchdogs.values():
             task.cancel()
         self._watchdogs.clear()
+        self._orders.clear()
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+
+    def prepare_call(self, call_id: str, order: IikoOrderSnapshot) -> None:
+        self._orders[call_id] = order
+
+    def clear_call(self, call_id: str) -> None:
+        self._orders.pop(call_id, None)
 
     def watch_dialing(self, call_id: str, timeout_seconds: int = 70) -> None:
         async def expire():
@@ -274,6 +310,7 @@ class AudioBridgeManager:
                     record = db.get(TestCall, call_id)
                     state = record.status if record else None
                 if state == "dialing":
+                    self.clear_call(call_id)
                     update_test_call(
                         call_id,
                         status="not_answered",
@@ -300,11 +337,14 @@ class AudioBridgeManager:
                 allowed = bool(record and record.status == "dialing")
             if not allowed:
                 raise RealtimeBridgeError("Неизвестный или уже завершённый тестовый звонок")
+            order = self._orders.pop(call_id, None)
+            if not order:
+                raise RealtimeBridgeError("Для тестового звонка не подготовлен заказ iiko")
             watchdog = self._watchdogs.pop(call_id, None)
             if watchdog:
                 watchdog.cancel()
             update_test_call(call_id, status="connected", connected_at=datetime.now(UTC), error="")
-            await self._run_yandex_bridge(call_id, reader, writer)
+            await self._run_yandex_bridge(call_id, order, reader, writer)
             update_test_call(call_id, status="completed", finished_at=datetime.now(UTC))
         except asyncio.IncompleteReadError:
             if call_id:
@@ -326,6 +366,7 @@ class AudioBridgeManager:
     async def _run_yandex_bridge(
         self,
         call_id: str,
+        order: IikoOrderSnapshot,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
@@ -333,20 +374,22 @@ class AudioBridgeManager:
         missing = [key for key in YANDEX_REQUIRED_KEYS if not settings.get(key)]
         if missing:
             raise RealtimeBridgeError("Не заполнены настройки Yandex Cloud")
-        client = YandexVoiceClient(settings)
+        client = YandexVoiceClient(settings, extra_instructions=order.prompt_context())
         history: list[dict[str, str]] = []
         detector = UtteranceDetector()
+        incoming: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=500)
+        reader_task = asyncio.create_task(self._audio_socket_to_queue(reader, incoming))
         try:
-            greeting = "Здравствуйте! Это тестовый звонок Sushi House. Подтвердите, пожалуйста, ваш заказ."
+            greeting = order.greeting()
             append_transcript(call_id, "assistant", greeting)
             await self._play_pcm(writer, await client.synthesize(greeting))
+            if self._discard_incoming(incoming):
+                return
             async with asyncio.timeout(5 * 60):
                 while True:
-                    message_type, payload = await self._read_packet(reader)
-                    if message_type in (0x00, 0xFF):
+                    payload = await incoming.get()
+                    if payload is None:
                         return
-                    if message_type != AUDIO_TYPE_PCM_8K or not payload:
-                        continue
                     utterance = detector.feed(payload)
                     if utterance is None:
                         continue
@@ -355,24 +398,73 @@ class AudioBridgeManager:
                         continue
                     append_transcript(call_id, "user", recognized)
                     history.append({"role": "user", "text": recognized})
-                    answer = await client.complete(history)
+                    answer = fast_confirmation_response(recognized) or await client.complete(history)
                     if not answer:
                         continue
                     history.append({"role": "assistant", "text": answer})
                     append_transcript(call_id, "assistant", answer)
+                    if self._discard_incoming(incoming):
+                        return
+                    detector.reset()
                     await self._play_pcm(writer, await client.synthesize(answer))
+                    if self._discard_incoming(incoming):
+                        return
+                    detector.reset()
         finally:
+            reader_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reader_task
             await client.close()
 
     @staticmethod
     async def _play_pcm(writer: asyncio.StreamWriter, pcm: bytes) -> None:
-        for offset in range(0, len(pcm), AUDIO_FRAME_BYTES):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time()
+        for frame_number, offset in enumerate(range(0, len(pcm), AUDIO_FRAME_BYTES), start=1):
             frame = pcm[offset:offset + AUDIO_FRAME_BYTES]
             if len(frame) < AUDIO_FRAME_BYTES:
                 frame += b"\x00" * (AUDIO_FRAME_BYTES - len(frame))
             writer.write(audio_socket_packet(AUDIO_TYPE_PCM_8K, frame))
-            await writer.drain()
-            await asyncio.sleep(0.02)
+            if frame_number % 5 == 0:
+                await writer.drain()
+            deadline += 0.02
+            delay = deadline - loop.time()
+            await asyncio.sleep(delay if delay > 0 else 0)
+        await writer.drain()
+
+    async def _audio_socket_to_queue(
+        self,
+        reader: asyncio.StreamReader,
+        queue: asyncio.Queue[bytes | None],
+    ) -> None:
+        try:
+            while True:
+                message_type, payload = await self._read_packet(reader)
+                if message_type in (0x00, 0xFF):
+                    await queue.put(None)
+                    return
+                if message_type != AUDIO_TYPE_PCM_8K or not payload:
+                    continue
+                if queue.full():
+                    with suppress(asyncio.QueueEmpty):
+                        queue.get_nowait()
+                queue.put_nowait(payload)
+        except (asyncio.IncompleteReadError, ConnectionError, OSError):
+            # Asterisk normally closes the AudioSocket when the call ends.  Make
+            # the bridge consume a regular end marker instead of surfacing a
+            # transport exception and incorrectly marking the call as failed.
+            with suppress(asyncio.QueueFull):
+                queue.put_nowait(None)
+
+    @staticmethod
+    def _discard_incoming(queue: asyncio.Queue[bytes | None]) -> bool:
+        closed = False
+        while True:
+            try:
+                if queue.get_nowait() is None:
+                    closed = True
+            except asyncio.QueueEmpty:
+                return closed
 
     @staticmethod
     async def _read_packet(reader: asyncio.StreamReader) -> tuple[int, bytes]:

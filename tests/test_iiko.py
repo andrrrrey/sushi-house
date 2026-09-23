@@ -8,6 +8,56 @@ from app.iiko import IikoClient
 
 
 class IikoClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_latest_accepted_starter_order_contains_items_and_address(self):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v2/access_token":
+                return httpx.Response(200, json={"token": "test-token"})
+            if request.url.path == "/api/1/organizations":
+                return httpx.Response(200, json={"organizations": [{"id": "org-1", "name": "Смолина"}]})
+            return httpx.Response(200, json={
+                "ordersByOrganizations": [{
+                    "organizationId": "org-1",
+                    "orders": [
+                        {"order": {
+                            "number": "100",
+                            "sourceKey": "Starter",
+                            "status": "Cancelled",
+                            "whenConfirmed": "2026-09-23 12:20:00.000",
+                            "cancelInfo": {"reason": "test"},
+                        }},
+                        {"order": {
+                            "number": "101",
+                            "sourceKey": "Starter",
+                            "status": "Closed",
+                            "whenConfirmed": "2026-09-23 12:21:00.000",
+                            "sum": 1630,
+                            "items": [{
+                                "amount": 2,
+                                "product": {"name": "Филадельфия"},
+                                "modifiers": [{"product": {"name": "Соевый соус"}}],
+                            }],
+                            "deliveryPoint": {"address": {
+                                "line1": "Улан-Удэ, Балтахинова, 36",
+                                "flat": "62",
+                                "entrance": "3",
+                                "floor": "5",
+                                "doorphone": "62",
+                            }},
+                        }},
+                    ],
+                }],
+            })
+
+        async with IikoClient("login", "app", "secret", transport=httpx.MockTransport(handler)) as client:
+            order = await client.latest_accepted_starter_order()
+
+        self.assertIsNotNone(order)
+        self.assertEqual(order.number, "101")
+        self.assertEqual(order.items[0].name, "Филадельфия")
+        self.assertIn("2 порции Филадельфия", order.greeting())
+        self.assertIn("квартира 62", order.greeting())
+        self.assertIn("1630 рублей", order.greeting())
+
     async def test_diagnostic_collects_read_only_data(self):
         async def handler(request: httpx.Request) -> httpx.Response:
             payloads = {

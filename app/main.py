@@ -51,7 +51,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.7.1", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.8.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -371,6 +371,23 @@ async def start_test_call(request: Request, csrf_token: str = Form(...)):
         if active_count:
             error = quote_plus("Другой тестовый звонок уже выполняется")
             return RedirectResponse(f"/calls?call_error={error}", status_code=303)
+        iiko_settings = load_settings("iiko_api_login", "iiko_app_id", "iiko_client_secret")
+        if len(iiko_settings) != 3:
+            error = quote_plus("Не заполнены настройки iiko для получения тестового заказа")
+            return RedirectResponse(f"/calls?call_error={error}", status_code=303)
+        try:
+            async with IikoClient(
+                iiko_settings["iiko_api_login"],
+                iiko_settings["iiko_app_id"],
+                iiko_settings["iiko_client_secret"],
+            ) as iiko_client:
+                test_order = await iiko_client.latest_accepted_starter_order()
+        except IikoError as exc:
+            error = quote_plus(f"Не удалось получить последний заказ iiko: {exc}")
+            return RedirectResponse(f"/calls?call_error={error}", status_code=303)
+        if not test_order:
+            error = quote_plus("За последние два дня в iiko не найден подтверждённый заказ Starter")
+            return RedirectResponse(f"/calls?call_error={error}", status_code=303)
         call_id = str(uuid.uuid4())
         with SessionLocal.begin() as db:
             db.add(TestCall(
@@ -379,6 +396,7 @@ async def start_test_call(request: Request, csrf_token: str = Form(...)):
                 phone_encrypted=encrypt_setting(settings["mango_test_phone"]),
                 model=settings["yandex_gpt_model"],
             ))
+        audio_bridge.prepare_call(call_id, test_order)
         try:
             originate_test_call(
                 settings["mango_test_phone"],
@@ -386,6 +404,7 @@ async def start_test_call(request: Request, csrf_token: str = Form(...)):
                 settings.get("mango_outbound_number", ""),
             )
         except SipError as exc:
+            audio_bridge.clear_call(call_id)
             with SessionLocal.begin() as db:
                 record = db.get(TestCall, call_id)
                 record.status = "failed"

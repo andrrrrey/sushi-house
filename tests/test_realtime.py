@@ -5,7 +5,14 @@ import json
 
 import httpx
 
-from app.realtime import UtteranceDetector, YandexVoiceClient, audio_socket_packet, pcm_rms
+from app.realtime import (
+    UtteranceDetector,
+    YandexVoiceClient,
+    audio_socket_packet,
+    downsample_pcm_16k_to_8k,
+    fast_confirmation_response,
+    pcm_rms,
+)
 
 
 def pcm_frame(level: int) -> bytes:
@@ -19,6 +26,17 @@ def test_audio_socket_packet_uses_big_endian_length():
 def test_pcm_rms_distinguishes_silence_from_speech_level():
     assert pcm_rms(pcm_frame(0)) == 0
     assert pcm_rms(pcm_frame(1200)) == 1200
+
+
+def test_downsample_averages_16k_sample_pairs():
+    source = array("h", [1000, 2000, -1000, -3000]).tobytes()
+    assert downsample_pcm_16k_to_8k(source) == array("h", [1500, -2000]).tobytes()
+
+
+def test_common_confirmation_answers_skip_language_model_delay():
+    assert "зафиксировано" in fast_confirmation_response("Да, всё верно")
+    assert "что именно" in fast_confirmation_response("Нет, не подтверждаю")
+    assert fast_confirmation_response("У меня вопрос по заказу") is None
 
 
 def test_utterance_detector_emits_pcm_after_trailing_silence():
@@ -68,7 +86,7 @@ def test_yandex_voice_client_uses_telephony_audio_and_model_uri():
                 "result": {"alternatives": [{"message": {"text": "Спасибо, заказ подтверждён."}}]},
             })
         return httpx.Response(200, json={
-            "result": {"audioChunk": {"data": base64.b64encode(b"\x01\x02").decode()}},
+            "result": {"audioChunk": {"data": base64.b64encode(array("h", [1000, 2000]).tobytes()).decode()}},
         })
 
     async def run():
@@ -87,7 +105,7 @@ def test_yandex_voice_client_uses_telephony_audio_and_model_uri():
         }, http_client=http)
         assert await client.recognize(b"pcm") == "Да, подтверждаю"
         assert await client.complete([{"role": "user", "text": "Да"}]) == "Спасибо, заказ подтверждён."
-        assert await client.synthesize("Спасибо") == b"\x01\x02"
+        assert await client.synthesize("Спасибо") == array("h", [1500]).tobytes()
         await client.close()
 
     asyncio.run(run())
@@ -102,5 +120,7 @@ def test_yandex_voice_client_uses_telephony_audio_and_model_uri():
     assert {"voice": "marina"} in tts_payload["hints"]
     assert {"role": "friendly"} in tts_payload["hints"]
     assert {"speed": "1.2"} in tts_payload["hints"]
-    assert tts_payload["outputAudioSpec"]["rawAudio"]["sampleRateHertz"] == "8000"
+    assert {"volume": "0.85"} in tts_payload["hints"]
+    assert tts_payload["outputAudioSpec"]["rawAudio"]["sampleRateHertz"] == "16000"
+    assert tts_payload["loudnessNormalizationType"] == "MAX_PEAK"
     assert tts_payload["unsafeMode"] is True
