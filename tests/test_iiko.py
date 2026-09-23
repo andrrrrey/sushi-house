@@ -4,7 +4,26 @@ from datetime import date
 
 import httpx
 
-from app.iiko import IikoClient
+from app.iiko import IikoClient, IikoOrderItem, clean_spoken_product_name, join_spoken_list
+
+
+class SpokenOrderTests(unittest.TestCase):
+    def test_receipt_weight_suffixes_are_not_spoken(self):
+        self.assertEqual(clean_spoken_product_name("Пибим паб с курицей, 500 г."), "Пибим паб с курицей")
+        self.assertEqual(clean_spoken_product_name("Запеченные мидии, 230/30 г."), "Запеченные мидии")
+        self.assertEqual(clean_spoken_product_name("Лимонад (500 мл)"), "Лимонад")
+        self.assertEqual(clean_spoken_product_name("Дип-пот Соевый соус"), "Соевый соус")
+
+    def test_quantities_and_list_sound_conversational(self):
+        values = [
+            IikoOrderItem("Филадельфия, 280 г.", 1).spoken(),
+            IikoOrderItem("Палочки", 3).spoken(),
+            IikoOrderItem("Соевый соус", 5).spoken(),
+        ]
+        self.assertEqual(
+            join_spoken_list(values),
+            "Филадельфия; Палочки — три порции; и Соевый соус — пять порций",
+        )
 
 
 class IikoClientTests(unittest.IsolatedAsyncioTestCase):
@@ -33,7 +52,7 @@ class IikoClientTests(unittest.IsolatedAsyncioTestCase):
                             "sum": 1630,
                             "items": [{
                                 "amount": 2,
-                                "product": {"name": "Филадельфия"},
+                                "product": {"name": "Филадельфия, 280 г."},
                                 "modifiers": [{"product": {"name": "Соевый соус"}}],
                             }],
                             "deliveryPoint": {"address": {
@@ -53,8 +72,10 @@ class IikoClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(order)
         self.assertEqual(order.number, "101")
-        self.assertEqual(order.items[0].name, "Филадельфия")
-        self.assertIn("2 порции Филадельфия", order.greeting())
+        self.assertEqual(order.items[0].name, "Филадельфия, 280 г.")
+        self.assertIn("Филадельфия — две порции", order.greeting())
+        self.assertNotIn("280", order.greeting())
+        self.assertNotIn("грам", order.greeting())
         self.assertIn("квартира 62", order.greeting())
         self.assertIn("1630 рублей", order.greeting())
 

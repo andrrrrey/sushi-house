@@ -1,11 +1,45 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+import re
 from typing import Any
 
 import httpx
 
 
 IIKO_BASE_URL = "https://api-ru.iiko.services"
+
+QUANTITY_WORDS = {
+    2: "две",
+    3: "три",
+    4: "четыре",
+    5: "пять",
+    6: "шесть",
+    7: "семь",
+    8: "восемь",
+    9: "девять",
+    10: "десять",
+}
+
+
+def clean_spoken_product_name(name: str) -> str:
+    """Remove receipt-only weight/volume suffixes from a product name."""
+    cleaned = re.sub(r"^\s*дип[- ]пот\s+", "", name, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\s*[,;]?\s*[\[(]?\d+(?:[.,]\d+)?(?:\s*/\s*\d+(?:[.,]\d+)?)*\s*"
+        r"(?:кг|гр|г|мл|л)[\])]?[.]?\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip(" ,;.-") or name.strip()
+
+
+def join_spoken_list(values: list[str]) -> str:
+    if not values:
+        return ""
+    if len(values) == 1:
+        return values[0]
+    return "; ".join(values[:-1]) + "; и " + values[-1]
 
 
 class IikoError(RuntimeError):
@@ -29,10 +63,20 @@ class IikoOrderItem:
     modifiers: tuple[str, ...] = ()
 
     def spoken(self) -> str:
-        quantity = int(self.amount) if self.amount.is_integer() else self.amount
-        value = self.name if self.amount == 1 else f"{quantity} порции {self.name}"
+        name = clean_spoken_product_name(self.name)
+        if self.amount == 1:
+            value = name
+        elif self.amount.is_integer():
+            quantity = int(self.amount)
+            quantity_text = QUANTITY_WORDS.get(quantity, str(quantity))
+            portion = "порции" if quantity % 10 in (2, 3, 4) and quantity % 100 not in (12, 13, 14) else "порций"
+            value = f"{name} — {quantity_text} {portion}"
+        else:
+            quantity_text = str(self.amount).replace(".", ",")
+            value = f"{name} — {quantity_text} порции"
         if self.modifiers:
-            value += f" с добавками: {', '.join(self.modifiers)}"
+            modifiers = [clean_spoken_product_name(item) for item in self.modifiers]
+            value += f". Добавки: {join_spoken_list(modifiers)}"
         return value
 
 
@@ -47,20 +91,20 @@ class IikoOrderSnapshot:
     address: str
 
     def spoken_items(self) -> str:
-        return ", ".join(item.spoken() for item in self.items) or "состав заказа не указан"
+        return join_spoken_list([item.spoken() for item in self.items]) or "состав заказа не указан"
 
     def spoken_total(self) -> str:
         if self.total is None:
             return ""
         total = int(self.total) if self.total.is_integer() else self.total
-        return f"Сумма заказа {total} рублей."
+        return f"Общая сумма — {total} рублей."
 
     def greeting(self) -> str:
-        delivery = f"Адрес доставки: {self.address}." if self.address else "Адрес доставки в iiko не указан."
+        delivery = f"Доставить нужно по адресу: {self.address}." if self.address else "Адрес доставки в iiko не указан."
         return (
-            f"Здравствуйте! Это Sushi House. Звоню для подтверждения заказа номер {self.number}. "
-            f"В заказе: {self.spoken_items()}. {self.spoken_total()} {delivery} "
-            "Подтверждаете заказ и адрес доставки?"
+            f"Здравствуйте! Это Sushi House. Хочу уточнить ваш заказ номер {self.number}. "
+            f"У вас: {self.spoken_items()}. {self.spoken_total()} {delivery} "
+            "Подскажите, пожалуйста, всё верно?"
         )
 
     def prompt_context(self) -> str:
@@ -71,6 +115,8 @@ class IikoOrderSnapshot:
             f"Состав: {self.spoken_items()}.\n"
             f"Сумма: {self.total if self.total is not None else 'не указана'}.\n"
             f"Адрес: {self.address or 'не указан'}.\n"
+            "Говори естественно, кратко и без канцеляризмов. Не произноси вес, граммы, миллилитры "
+            "и технологические обозначения. "
             "Попроси подтвердить состав и адрес. Если клиент подтверждает, скажи, что подтверждение "
             "зафиксировано только в тестовом журнале и не отправлено в iiko."
         )
