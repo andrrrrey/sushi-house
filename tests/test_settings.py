@@ -4,6 +4,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from app.settings_catalog import SETTINGS_BY_KEY
 from app.sip import SipStatus
+from app.yandex_voices import VOICE_OPTIONS, VOICE_ROLES, role_supported
 
 
 def test_voice_robot_settings_are_available():
@@ -13,6 +14,7 @@ def test_voice_robot_settings_are_available():
         "yandex_gpt_model",
         "yandex_voice",
         "yandex_voice_emotion",
+        "yandex_voice_speed",
         "yandex_system_prompt",
         "mango_test_phone",
     }
@@ -26,8 +28,51 @@ def test_prompt_is_multiline_and_defaults_are_safe_for_test_mode():
     assert prompt.multiline is True
     assert "не меняет заказ" in prompt.default
     assert SETTINGS_BY_KEY["yandex_gpt_model"].default == "yandexgpt/latest"
-    assert SETTINGS_BY_KEY["yandex_voice"].default == "alena"
-    assert SETTINGS_BY_KEY["yandex_voice_emotion"].default == "good"
+    assert SETTINGS_BY_KEY["yandex_voice"].default == "marina"
+    assert len(SETTINGS_BY_KEY["yandex_voice"].choices) == 18
+    assert SETTINGS_BY_KEY["yandex_voice_emotion"].default == "friendly"
+    assert SETTINGS_BY_KEY["yandex_voice_speed"].default == "1.0"
+
+
+def test_voice_and_emotion_render_as_selects_and_speed_as_number():
+    environment = Environment(loader=FileSystemLoader("app/templates"), autoescape=True)
+    template = environment.get_template("settings.html")
+    definitions = [
+        SETTINGS_BY_KEY["yandex_voice"],
+        SETTINGS_BY_KEY["yandex_voice_emotion"],
+        SETTINGS_BY_KEY["yandex_voice_speed"],
+    ]
+
+    html = template.render(
+        user=SimpleNamespace(username="admin"),
+        active="settings",
+        csrf_token="test-token",
+        saved=None,
+        error=None,
+        sections=[{
+            "name": "ИИ-робот и тестовый контур",
+            "items": [{
+                "definition": definition,
+                "configured": False,
+                "value": definition.default,
+                "updated_at": None,
+            } for definition in definitions],
+        }],
+    )
+
+    assert html.count("<select") == 2
+    assert "Марина · женский" in html
+    assert "Дружелюбно" in html
+    assert 'type="number"' in html
+    assert 'min="0.1"' in html
+    assert 'max="3.0"' in html
+
+
+def test_every_offered_voice_has_an_emotion_profile():
+    assert {voice for voice, _ in VOICE_OPTIONS} == set(VOICE_ROLES)
+    assert role_supported("marina", "friendly") is True
+    assert role_supported("filipp", "friendly") is False
+    assert role_supported("filipp", "auto") is True
 
 
 def test_settings_template_renders_sections_from_dicts():

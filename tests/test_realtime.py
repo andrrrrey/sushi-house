@@ -1,5 +1,6 @@
 import asyncio
 from array import array
+import base64
 import json
 
 import httpx
@@ -66,7 +67,9 @@ def test_yandex_voice_client_uses_telephony_audio_and_model_uri():
             return httpx.Response(200, json={
                 "result": {"alternatives": [{"message": {"text": "Спасибо, заказ подтверждён."}}]},
             })
-        return httpx.Response(200, content=b"\x01\x02")
+        return httpx.Response(200, json={
+            "result": {"audioChunk": {"data": base64.b64encode(b"\x01\x02").decode()}},
+        })
 
     async def run():
         http = httpx.AsyncClient(
@@ -77,8 +80,9 @@ def test_yandex_voice_client_uses_telephony_audio_and_model_uri():
             "yandex_api_key": "test-key",
             "yandex_folder_id": "folder-1",
             "yandex_gpt_model": "yandexgpt/latest",
-            "yandex_voice": "alena",
-            "yandex_voice_emotion": "good",
+            "yandex_voice": "marina",
+            "yandex_voice_emotion": "friendly",
+            "yandex_voice_speed": "1.2",
             "yandex_system_prompt": "Говори кратко",
         }, http_client=http)
         assert await client.recognize(b"pcm") == "Да, подтверждаю"
@@ -94,7 +98,9 @@ def test_yandex_voice_client_uses_telephony_audio_and_model_uri():
     llm_payload = json.loads(requests[1].content)
     assert llm_payload["modelUri"] == "gpt://folder-1/yandexgpt/latest"
     assert llm_payload["messages"][0] == {"role": "system", "text": "Говори кратко"}
-    tts_payload = requests[2].content.decode()
-    assert "voice=alena" in tts_payload
-    assert "emotion=good" in tts_payload
-    assert "sampleRateHertz=8000" in tts_payload
+    tts_payload = json.loads(requests[2].content)
+    assert {"voice": "marina"} in tts_payload["hints"]
+    assert {"role": "friendly"} in tts_payload["hints"]
+    assert {"speed": "1.2"} in tts_payload["hints"]
+    assert tts_payload["outputAudioSpec"]["rawAudio"]["sampleRateHertz"] == "8000"
+    assert tts_payload["unsafeMode"] is True

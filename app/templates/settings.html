@@ -20,8 +20,14 @@
           <div class="setting-state {{ 'configured' if item.configured else '' }}">{{ 'Настроено' if item.configured else 'Не задано' }}</div>
           {% if item.definition.multiline %}
           <textarea id="{{ item.definition.key }}" name="value" rows="9" maxlength="{{ item.definition.max_length }}" placeholder="{{ item.definition.placeholder }}" autocomplete="off">{{ item.value }}</textarea>
+          {% elif item.definition.choices %}
+          <select id="{{ item.definition.key }}" name="value">
+            {% for option_value, option_label in item.definition.choices %}
+            <option value="{{ option_value }}" {{ 'selected' if option_value == item.value else '' }}>{{ option_label }}</option>
+            {% endfor %}
+          </select>
           {% else %}
-          <input id="{{ item.definition.key }}" name="value" type="{{ 'password' if item.definition.sensitive else 'text' }}" value="{{ item.value }}" maxlength="{{ item.definition.max_length }}" placeholder="{{ '••••••••••••' if item.configured and item.definition.sensitive else item.definition.placeholder }}" autocomplete="off">
+          <input id="{{ item.definition.key }}" name="value" type="{{ 'password' if item.definition.sensitive else item.definition.input_type }}" value="{{ item.value }}" maxlength="{{ item.definition.max_length }}" placeholder="{{ '••••••••••••' if item.configured and item.definition.sensitive else item.definition.placeholder }}" {% if item.definition.min_value %}min="{{ item.definition.min_value }}"{% endif %} {% if item.definition.max_value %}max="{{ item.definition.max_value }}"{% endif %} {% if item.definition.step %}step="{{ item.definition.step }}"{% endif %} autocomplete="off">
           {% endif %}
           <button type="submit">Сохранить</button>
         </form>

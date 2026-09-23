@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from app.yandex_voices import ROLE_OPTIONS, VOICE_OPTIONS
+
 
 @dataclass(frozen=True)
 class SettingDefinition:
@@ -12,6 +14,11 @@ class SettingDefinition:
     default: str = ""
     placeholder: str = "Введите значение"
     max_length: int = 512
+    choices: tuple[tuple[str, str], ...] = ()
+    input_type: str = "text"
+    min_value: str = ""
+    max_value: str = ""
+    step: str = ""
 
 
 SETTINGS = (
@@ -58,21 +65,37 @@ SETTINGS = (
         "yandex_voice",
         "Голос SpeechKit",
         "ИИ-робот и тестовый контур",
-        "Голос SpeechKit REST v1; по умолчанию alena",
+        "Все русскоязычные стандартные голоса SpeechKit",
         False,
-        default="alena",
-        placeholder="alena",
+        default="marina",
+        placeholder="marina",
         max_length=64,
+        choices=VOICE_OPTIONS,
     ),
     SettingDefinition(
         "yandex_voice_emotion",
         "Эмоция голоса",
         "ИИ-робот и тестовый контур",
-        "Эмоция, которую поддерживает выбранный голос; для alena доступна good",
+        "Амплуа должно поддерживаться выбранным голосом",
         False,
-        default="good",
-        placeholder="good",
+        default="friendly",
+        placeholder="friendly",
         max_length=64,
+        choices=ROLE_OPTIONS,
+    ),
+    SettingDefinition(
+        "yandex_voice_speed",
+        "Скорость голоса",
+        "ИИ-робот и тестовый контур",
+        "Темп синтеза: от 0.1 до 3.0, обычная скорость — 1.0",
+        False,
+        default="1.0",
+        placeholder="1.0",
+        max_length=4,
+        input_type="number",
+        min_value="0.1",
+        max_value="3.0",
+        step="0.1",
     ),
     SettingDefinition(
         "yandex_system_prompt",

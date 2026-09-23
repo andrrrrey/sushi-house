@@ -1,9 +1,12 @@
 import asyncio
 from array import array
+import base64
+import binascii
 from collections import deque
 from contextlib import suppress
 from datetime import UTC, datetime
 import logging
+import json
 import os
 import struct
 import uuid
@@ -100,11 +103,11 @@ class UtteranceDetector:
 
 
 def load_voice_settings() -> dict[str, str]:
-    keys = (*YANDEX_REQUIRED_KEYS, "yandex_voice_emotion", "mango_test_phone")
+    keys = (*YANDEX_REQUIRED_KEYS, "yandex_voice_emotion", "yandex_voice_speed", "mango_test_phone")
     with SessionLocal() as db:
         records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(keys))).all()
     values = {record.key: decrypt_setting(record.encrypted_value) for record in records}
-    for key in ("yandex_gpt_model", "yandex_voice", "yandex_voice_emotion", "yandex_system_prompt"):
+    for key in ("yandex_gpt_model", "yandex_voice", "yandex_voice_emotion", "yandex_voice_speed", "yandex_system_prompt"):
         values.setdefault(key, SETTINGS_BY_KEY[key].default)
     return values
 
@@ -133,7 +136,7 @@ def append_transcript(call_id: str, speaker: str, text: str) -> None:
 
 class YandexVoiceClient:
     STT_URL = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
-    TTS_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
+    TTS_URL = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
     LLM_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
     def __init__(self, settings: dict[str, str], http_client: httpx.AsyncClient | None = None):
@@ -141,7 +144,8 @@ class YandexVoiceClient:
         self.folder_id = settings["yandex_folder_id"]
         self.model = settings["yandex_gpt_model"]
         self.voice = settings["yandex_voice"]
-        self.emotion = settings.get("yandex_voice_emotion", "good")
+        self.emotion = settings.get("yandex_voice_emotion", "friendly")
+        self.speed = settings.get("yandex_voice_speed", "1.0")
         self.system_prompt = settings["yandex_system_prompt"]
         self.http = http_client or httpx.AsyncClient(
             headers={"Authorization": f"Api-Key {self.api_key}"},
@@ -197,19 +201,44 @@ class YandexVoiceClient:
             raise RealtimeBridgeError("YandexGPT вернул ответ неизвестного формата") from exc
 
     async def synthesize(self, text: str) -> bytes:
-        data = {
-            "text": text[:5000],
-            "lang": "ru-RU",
-            "voice": self.voice,
-            "speed": "1.0",
-            "format": "lpcm",
-            "sampleRateHertz": "8000",
-        }
-        if self.emotion:
-            data["emotion"] = self.emotion
-        response = await self.http.post(self.TTS_URL, data=data)
+        hints = [{"voice": self.voice}, {"speed": self.speed}]
+        if self.emotion and self.emotion != "auto":
+            hints.append({"role": self.emotion})
+        response = await self.http.post(
+            self.TTS_URL,
+            json={
+                "text": text[:5000],
+                "hints": hints,
+                "outputAudioSpec": {
+                    "rawAudio": {"audioEncoding": "LINEAR16_PCM", "sampleRateHertz": "8000"},
+                },
+                "loudnessNormalizationType": "LUFS",
+                "unsafeMode": True,
+            },
+        )
         self._raise(response, "Yandex SpeechKit TTS")
-        return response.content
+        try:
+            parsed = response.json()
+            payloads = parsed if isinstance(parsed, list) else [parsed]
+        except json.JSONDecodeError:
+            try:
+                payloads = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+            except json.JSONDecodeError as exc:
+                raise RealtimeBridgeError("Yandex SpeechKit TTS вернул ответ неизвестного формата") from exc
+        chunks = []
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            result = payload.get("result", payload)
+            encoded = (result.get("audioChunk") or {}).get("data") if isinstance(result, dict) else None
+            if encoded:
+                try:
+                    chunks.append(base64.b64decode(encoded, validate=True))
+                except (ValueError, binascii.Error) as exc:
+                    raise RealtimeBridgeError("Yandex SpeechKit TTS вернул повреждённый аудиофрагмент") from exc
+        if not chunks:
+            raise RealtimeBridgeError("Yandex SpeechKit TTS не вернул аудио")
+        return b"".join(chunks)
 
 
 class AudioBridgeManager:

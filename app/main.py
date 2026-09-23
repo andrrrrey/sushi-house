@@ -23,6 +23,7 @@ from app.realtime import ACTIVE_CALL_STATES, audio_bridge
 from app.security import decrypt_setting, encrypt_setting, get_csrf_token, hash_password, verify_csrf, verify_password
 from app.settings_catalog import SETTINGS, SETTINGS_BY_KEY
 from app.sip import SIP_REQUIRED_KEYS, SipError, apply_registration, originate_test_call, registration_status
+from app.yandex_voices import VOICE_ROLES, default_role, role_supported
 
 
 templates = Jinja2Templates(directory="app/templates")
@@ -50,7 +51,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.7.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.7.1", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -119,12 +120,13 @@ def effective_voice_settings() -> dict[str, str]:
         "yandex_gpt_model",
         "yandex_voice",
         "yandex_voice_emotion",
+        "yandex_voice_speed",
         "yandex_system_prompt",
         "mango_test_phone",
         "mango_outbound_number",
     )
     values = load_settings(*keys)
-    for key in ("yandex_gpt_model", "yandex_voice", "yandex_voice_emotion", "yandex_system_prompt"):
+    for key in ("yandex_gpt_model", "yandex_voice", "yandex_voice_emotion", "yandex_voice_speed", "yandex_system_prompt"):
         values.setdefault(key, SETTINGS_BY_KEY[key].default)
     return values
 
@@ -562,12 +564,29 @@ async def update_setting(
         return RedirectResponse("/settings", status_code=303)
     if len(value) > definition.max_length:
         return RedirectResponse(f"/settings?error={quote_plus('Слишком длинное значение')}", status_code=303)
+    if definition.choices and value not in {choice_value for choice_value, _ in definition.choices}:
+        return RedirectResponse(f"/settings?error={quote_plus('Выбрано недопустимое значение')}", status_code=303)
     if setting_key == "mango_test_phone" and (not value.startswith("+") or not value[1:].isdigit() or not 11 <= len(value[1:]) <= 15):
         error = quote_plus("Тестовый номер нужен в формате +79991234567")
         return RedirectResponse(f"/settings?error={error}", status_code=303)
     if setting_key == "yandex_folder_id" and not all(character.isalnum() or character in "-_" for character in value):
         error = quote_plus("Yandex Folder ID содержит недопустимые символы")
         return RedirectResponse(f"/settings?error={error}", status_code=303)
+    if setting_key == "yandex_voice_speed":
+        try:
+            speed = float(value)
+        except ValueError:
+            speed = 0
+        if not 0.1 <= speed <= 3.0:
+            error = quote_plus("Скорость голоса должна быть от 0.1 до 3.0")
+            return RedirectResponse(f"/settings?error={error}", status_code=303)
+        value = f"{speed:.1f}"
+    if setting_key == "yandex_voice_emotion":
+        selected_voice = load_settings("yandex_voice").get("yandex_voice", SETTINGS_BY_KEY["yandex_voice"].default)
+        if not role_supported(selected_voice, value):
+            available = ", ".join(VOICE_ROLES.get(selected_voice, ())) or "только значение по умолчанию"
+            error = quote_plus(f"Голос {selected_voice} поддерживает: {available}")
+            return RedirectResponse(f"/settings?error={error}", status_code=303)
     with SessionLocal.begin() as db:
         record = db.scalar(select(IntegrationSetting).where(IntegrationSetting.key == setting_key))
         encrypted = encrypt_setting(value)
@@ -576,6 +595,16 @@ async def update_setting(
             record.updated_at = datetime.now(UTC)
         else:
             db.add(IntegrationSetting(key=setting_key, encrypted_value=encrypted))
+        if setting_key == "yandex_voice":
+            emotion_record = db.scalar(select(IntegrationSetting).where(IntegrationSetting.key == "yandex_voice_emotion"))
+            current_emotion = decrypt_setting(emotion_record.encrypted_value) if emotion_record else SETTINGS_BY_KEY["yandex_voice_emotion"].default
+            if not role_supported(value, current_emotion):
+                fallback = encrypt_setting(default_role(value))
+                if emotion_record:
+                    emotion_record.encrypted_value = fallback
+                    emotion_record.updated_at = datetime.now(UTC)
+                else:
+                    db.add(IntegrationSetting(key="yandex_voice_emotion", encrypted_value=fallback))
         db.add(AuditEvent(event_type="setting_updated", actor=user.username, details=setting_key))
     return RedirectResponse(f"/settings?saved={setting_key}", status_code=303)
 
