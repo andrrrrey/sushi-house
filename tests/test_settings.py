@@ -49,6 +49,7 @@ def test_voice_and_emotion_render_as_selects_and_speed_as_number():
         csrf_token="test-token",
         saved=None,
         error=None,
+        voice_preview_ready=True,
         sections=[{
             "name": "ИИ-робот и тестовый контур",
             "items": [{
@@ -66,6 +67,9 @@ def test_voice_and_emotion_render_as_selects_and_speed_as_number():
     assert 'type="number"' in html
     assert 'min="0.1"' in html
     assert 'max="3.0"' in html
+    assert 'Послушать голос Yandex' in html
+    assert '/settings/yandex-voice-preview' in html
+    assert '<audio' in html
 
 
 def test_every_offered_voice_has_an_emotion_profile():

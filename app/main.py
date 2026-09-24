@@ -7,7 +7,7 @@ from urllib.parse import quote_plus
 import uuid
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select, text
@@ -19,7 +19,7 @@ from app.db import Base, SessionLocal, engine
 from app.iiko import IikoClient, IikoError
 from app.mango import MangoEventError, parse_call_event, verify_signature
 from app.models import AuditEvent, IntegrationSetting, MangoCallEvent, TestCall, User
-from app.realtime import ACTIVE_CALL_STATES, audio_bridge
+from app.realtime import ACTIVE_CALL_STATES, RealtimeBridgeError, YandexVoiceClient, audio_bridge, pcm16_wav
 from app.security import decrypt_setting, encrypt_setting, get_csrf_token, hash_password, verify_csrf, verify_password
 from app.settings_catalog import SETTINGS, SETTINGS_BY_KEY
 from app.sip import SIP_REQUIRED_KEYS, SipError, apply_registration, originate_test_call, registration_status
@@ -51,7 +51,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.8.1", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.8.2", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -557,10 +557,69 @@ async def settings_page(request: Request, saved: str | None = None, error: str |
                 "updated_at": record.updated_at.strftime("%d.%m.%Y %H:%M") if record else None,
             })
         sections.append({"name": section_name, "items": items})
+    voice_preview_ready = bool(stored.get("yandex_api_key") and stored.get("yandex_folder_id"))
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
-        context=page_context(request, user=user, active="settings", sections=sections, saved=saved, error=error),
+        context=page_context(
+            request,
+            user=user,
+            active="settings",
+            sections=sections,
+            saved=saved,
+            error=error,
+            voice_preview_ready=voice_preview_ready,
+        ),
+    )
+
+
+@app.post("/settings/yandex-voice-preview")
+async def yandex_voice_preview(
+    request: Request,
+    voice: str = Form(...),
+    emotion: str = Form(...),
+    speed: str = Form(...),
+    csrf_token: str = Form(...),
+):
+    verify_csrf(request, csrf_token)
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    if voice not in VOICE_ROLES:
+        return JSONResponse({"error": "Выбран неизвестный голос Yandex"}, status_code=422)
+    if not role_supported(voice, emotion):
+        return JSONResponse({"error": "Выбранное амплуа не поддерживается этим голосом"}, status_code=422)
+    try:
+        speed_value = float(speed)
+    except ValueError:
+        speed_value = 0
+    if not 0.1 <= speed_value <= 3.0:
+        return JSONResponse({"error": "Скорость должна быть от 0.1 до 3.0"}, status_code=422)
+
+    settings = effective_voice_settings()
+    if not settings.get("yandex_api_key") or not settings.get("yandex_folder_id"):
+        return JSONResponse({"error": "Сначала сохраните Yandex Cloud API Key и Folder ID"}, status_code=422)
+    settings.update({
+        "yandex_voice": voice,
+        "yandex_voice_emotion": emotion,
+        "yandex_voice_speed": f"{speed_value:.1f}",
+    })
+    client = YandexVoiceClient(settings)
+    try:
+        pcm = await client.synthesize(
+            "Здравствуйте! Это Суши Хаус. Я помогу уточнить и подтвердить ваш заказ. "
+            "Подскажите, пожалуйста, всё ли верно?"
+        )
+    except RealtimeBridgeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    finally:
+        await client.close()
+    with SessionLocal.begin() as db:
+        db.add(AuditEvent(event_type="voice_previewed", actor=user.username, details=f"{voice}/{emotion}/{speed_value:.1f}"))
+    return Response(
+        content=pcm16_wav(pcm),
+        media_type="audio/wav",
+        headers={"Content-Disposition": "inline; filename=yandex-voice-preview.wav"},
     )
 
 

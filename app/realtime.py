@@ -11,6 +11,8 @@ import os
 import re
 import struct
 import uuid
+from io import BytesIO
+import wave
 
 import httpx
 from sqlalchemy import select
@@ -61,6 +63,16 @@ def downsample_pcm_16k_to_8k(payload: bytes) -> bytes:
     for index in range(0, len(samples), 2):
         output.append(round((samples[index] + samples[index + 1]) / 2))
     return output.tobytes()
+
+
+def pcm16_wav(payload: bytes, sample_rate: int = 8000) -> bytes:
+    output = BytesIO()
+    with wave.open(output, "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(sample_rate)
+        stream.writeframes(payload)
+    return output.getvalue()
 
 
 def fast_confirmation_response(text: str) -> str | None:

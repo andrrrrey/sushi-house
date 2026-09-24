@@ -1,7 +1,9 @@
 import asyncio
 from array import array
 import base64
+from io import BytesIO
 import json
+import wave
 
 import httpx
 
@@ -11,6 +13,7 @@ from app.realtime import (
     audio_socket_packet,
     downsample_pcm_16k_to_8k,
     fast_confirmation_response,
+    pcm16_wav,
     pcm_rms,
 )
 
@@ -31,6 +34,15 @@ def test_pcm_rms_distinguishes_silence_from_speech_level():
 def test_downsample_averages_16k_sample_pairs():
     source = array("h", [1000, 2000, -1000, -3000]).tobytes()
     assert downsample_pcm_16k_to_8k(source) == array("h", [1500, -2000]).tobytes()
+
+
+def test_pcm_preview_is_browser_playable_wav():
+    source = array("h", [1000, -1000, 500, -500]).tobytes()
+    with wave.open(BytesIO(pcm16_wav(source)), "rb") as stream:
+        assert stream.getnchannels() == 1
+        assert stream.getsampwidth() == 2
+        assert stream.getframerate() == 8000
+        assert stream.readframes(4) == source
 
 
 def test_common_confirmation_answers_skip_language_model_delay():
