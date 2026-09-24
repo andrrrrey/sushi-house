@@ -69,6 +69,7 @@ def test_voice_and_emotion_render_as_selects_and_speed_as_number():
     assert 'max="3.0"' in html
     assert 'Послушать голос Yandex' in html
     assert '/settings/yandex-voice-preview' in html
+    assert '/static/settings.js' in html
     assert '<audio' in html
 
 
