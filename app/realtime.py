@@ -75,15 +75,19 @@ def pcm16_wav(payload: bytes, sample_rate: int = 8000) -> bytes:
     return output.getvalue()
 
 
-def fast_confirmation_response(text: str) -> str | None:
+def fast_confirmation_response(text: str, customer_name: str = "") -> str | None:
     normalized = " ".join(text.lower().replace("ё", "е").split())
     words = set(re.findall(r"[\w-]+", normalized))
     negative_phrases = ("не подтверждаю", "неверно", "не верно", "ошибка")
     positive_phrases = ("подтверждаю", "все верно", "все правильно")
+    correction_words = {"но", "нужно", "надо"}
+    correction_stems = ("измен", "добав", "убер", "удал", "замен", "неправил", "ошиб")
+    address = f"{customer_name}, " if customer_name else ""
     if "нет" in words or any(phrase in normalized for phrase in negative_phrases):
-        return "Понял. Скажите, пожалуйста, что именно в заказе или адресе указано неверно."
-    if {"да", "верно"} & words or any(phrase in normalized for phrase in positive_phrases):
-        return "Спасибо. Ваше подтверждение зафиксировано только в тестовом журнале и не отправлено в iiko."
+        return f"{address}поняла. Скажите, пожалуйста, что именно в заказе, адресе или способе оплаты указано неверно."
+    has_correction = bool(correction_words & words) or any(stem in normalized for stem in correction_stems)
+    if not has_correction and ({"да", "верно"} & words or any(phrase in normalized for phrase in positive_phrases)):
+        return f"{address}спасибо. Я зафиксировала ваше подтверждение только в тестовом журнале и не отправила его в iiko."
     return None
 
 
@@ -410,7 +414,7 @@ class AudioBridgeManager:
                         continue
                     append_transcript(call_id, "user", recognized)
                     history.append({"role": "user", "text": recognized})
-                    answer = fast_confirmation_response(recognized) or await client.complete(history)
+                    answer = fast_confirmation_response(recognized, order.first_name()) or await client.complete(history)
                     if not answer:
                         continue
                     history.append({"role": "assistant", "text": answer})

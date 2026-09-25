@@ -46,8 +46,14 @@ def test_pcm_preview_is_browser_playable_wav():
 
 
 def test_common_confirmation_answers_skip_language_model_delay():
-    assert "зафиксировано" in fast_confirmation_response("Да, всё верно")
-    assert "что именно" in fast_confirmation_response("Нет, не подтверждаю")
+    positive = fast_confirmation_response("Да, всё верно", "Оксана")
+    negative = fast_confirmation_response("Нет, не подтверждаю", "Оксана")
+    assert positive is not None and positive.startswith("Оксана, спасибо")
+    assert "Я зафиксировала" in positive
+    assert negative is not None and negative.startswith("Оксана, поняла")
+    assert "что именно" in negative
+    assert fast_confirmation_response("Да, но нужно четыре палочки", "Оксана") is None
+    assert fast_confirmation_response("Да, нормально", "Оксана") is not None
     assert fast_confirmation_response("У меня вопрос по заказу") is None
 
 

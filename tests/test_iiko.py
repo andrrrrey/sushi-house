@@ -1,10 +1,10 @@
 import json
 import unittest
-from datetime import date
+from datetime import date, datetime
 
 import httpx
 
-from app.iiko import IikoClient, IikoOrderItem, clean_spoken_product_name, join_spoken_list
+from app.iiko import IikoClient, IikoOrderItem, IikoOrderSnapshot, clean_spoken_product_name, join_spoken_list
 
 
 class SpokenOrderTests(unittest.TestCase):
@@ -22,8 +22,31 @@ class SpokenOrderTests(unittest.TestCase):
         ]
         self.assertEqual(
             join_spoken_list(values),
-            "Филадельфия; три комплекта палочек; и пять порций соевого соуса",
+            "Филадельфия — одна порция; три комплекта палочек; и пять порций соевого соуса",
         )
+
+    def test_greeting_uses_local_day_part_customer_and_payment(self):
+        order = IikoOrderSnapshot(
+            organization="Смолина",
+            number="101",
+            status="Confirmed",
+            confirmed_at=datetime(2026, 9, 25, 10),
+            items=(IikoOrderItem("Филадельфия, 280 г.", 1),),
+            total=900.0,
+            address="Улан-Удэ, Ленина, 1",
+            customer_name="Оксана Иванова",
+            payment_methods=("картой",),
+        )
+
+        self.assertTrue(order.greeting(datetime(2026, 9, 25, 11, 59)).startswith("Доброе утро, Оксана!"))
+        self.assertTrue(order.greeting(datetime(2026, 9, 25, 12)).startswith("Добрый день, Оксана!"))
+        self.assertTrue(order.greeting(datetime(2026, 9, 25, 18)).startswith("Добрый вечер, Оксана!"))
+        self.assertIn("Филадельфия — одна порция", order.greeting(datetime(2026, 9, 25, 12)))
+        self.assertIn("Оплата картой", order.greeting(datetime(2026, 9, 25, 12)))
+        prompt = order.prompt_context()
+        self.assertIn("Имя клиента: Оксана", prompt)
+        self.assertIn("женском роде", prompt)
+        self.assertIn("повтори весь заказ целиком", prompt)
 
 
 class IikoClientTests(unittest.IsolatedAsyncioTestCase):
@@ -50,10 +73,15 @@ class IikoClientTests(unittest.IsolatedAsyncioTestCase):
                             "status": "Closed",
                             "whenConfirmed": "2026-09-23 12:21:00.000",
                             "sum": 1630,
+                            "customer": {"name": "Оксана Иванова"},
+                            "payments": [
+                                {"paymentType": {"name": "Безналичные", "kind": "Card"}},
+                                {"paymentType": {"name": "Оплата бонусными баллами", "kind": "Unknown"}},
+                            ],
                             "items": [{
                                 "amount": 2,
                                 "product": {"name": "Филадельфия, 280 г."},
-                                "modifiers": [{"product": {"name": "Соевый соус"}}],
+                                "modifiers": [{"amount": 2, "product": {"name": "Соевый соус"}}],
                             }],
                             "deliveryPoint": {"address": {
                                 "line1": "Улан-Удэ, Балтахинова, 36",
@@ -73,6 +101,9 @@ class IikoClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(order)
         self.assertEqual(order.number, "101")
         self.assertEqual(order.items[0].name, "Филадельфия, 280 г.")
+        self.assertEqual(order.items[0].modifiers, ("две порции соевого соуса",))
+        self.assertEqual(order.first_name(), "Оксана")
+        self.assertEqual(order.payment_methods, ("картой", "бонусными баллами"))
         self.assertIn("Филадельфия — две порции", order.greeting())
         self.assertNotIn("280", order.greeting())
         self.assertNotIn("грам", order.greeting())

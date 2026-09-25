@@ -51,7 +51,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.8.2", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.9.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -387,6 +387,9 @@ async def start_test_call(request: Request, csrf_token: str = Form(...)):
             return RedirectResponse(f"/calls?call_error={error}", status_code=303)
         if not test_order:
             error = quote_plus("За последние два дня в iiko не найден подтверждённый заказ Starter")
+            return RedirectResponse(f"/calls?call_error={error}", status_code=303)
+        if not test_order.first_name():
+            error = quote_plus("В последнем заказе Starter не указано имя клиента")
             return RedirectResponse(f"/calls?call_error={error}", status_code=303)
         call_id = str(uuid.uuid4())
         with SessionLocal.begin() as db:
