@@ -20,8 +20,9 @@ from sqlalchemy import select
 from app.db import SessionLocal
 from app.iiko import IikoClient, IikoError, IikoOrderSnapshot, RESTAURANT_TIMEZONE
 from app.inbound import constrain_order_progress, knowledge_context, menu_candidates, new_order_state, next_order_reply, order_dialog_step, parse_structured_response, save_inbound_state, validate_order_items
+from app.mango import phones_match
 from app.models import InboundCall, IntegrationSetting, TestCall
-from app.security import decrypt_setting
+from app.security import decrypt_setting, encrypt_setting
 from app.settings_catalog import SETTINGS_BY_KEY
 from app.sip import SipError, redirect_active_inbound_to_operator
 
@@ -176,6 +177,28 @@ def append_transcript(call_id: str, speaker: str, text: str) -> None:
         prefix = "Робот" if speaker == "assistant" else "Абонент"
         line = f"{prefix}: {text}"
         record.transcript = f"{record.transcript}\n{line}".strip()[-12000:]
+
+
+def known_inbound_customer(phone: str) -> str:
+    if not phone:
+        return ""
+    with SessionLocal() as db:
+        records = db.scalars(
+            select(InboundCall)
+            .where(InboundCall.customer_name != "")
+            .order_by(InboundCall.created_at.desc())
+            .limit(100)
+        ).all()
+    for record in records:
+        if not record.phone_encrypted:
+            continue
+        try:
+            stored_phone = decrypt_setting(record.phone_encrypted)
+        except Exception:
+            continue
+        if phones_match(stored_phone, phone):
+            return record.customer_name.strip()
+    return ""
 
 
 class YandexVoiceClient:
@@ -407,14 +430,18 @@ class AudioBridgeManager:
                 inbound = {item.key: decrypt_setting(item.encrypted_value) for item in setting_records}
                 if inbound.get("mango_inbound_enabled") != "on" or not inbound.get("mango_test_phone"):
                     raise RealtimeBridgeError("Входящий тестовый контур выключен")
+                caller_phone = inbound["mango_test_phone"]
+                initial_state = new_order_state()
+                initial_state["customer_name"] = known_inbound_customer(caller_phone)
                 with SessionLocal.begin() as db:
                     db.add(InboundCall(
                         id=call_id,
                         status="connected",
-                        phone_encrypted="",
-                        draft_order=json.dumps(new_order_state(), ensure_ascii=False),
+                        phone_encrypted=encrypt_setting(caller_phone),
+                        customer_name=initial_state["customer_name"],
+                        draft_order=json.dumps(initial_state, ensure_ascii=False),
                     ))
-                await self._run_inbound_bridge(call_id, runtime, reader, writer)
+                await self._run_inbound_bridge(call_id, runtime, reader, writer, initial_state)
                 with SessionLocal.begin() as db:
                     inbound_record = db.get(InboundCall, call_id)
                     if inbound_record:
@@ -473,6 +500,7 @@ class AudioBridgeManager:
         settings: dict[str, str],
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        initial_state: dict | None = None,
     ) -> None:
         missing = [key for key in YANDEX_REQUIRED_KEYS if not settings.get(key)]
         if missing:
@@ -483,7 +511,7 @@ class AudioBridgeManager:
         client = YandexVoiceClient(settings)
         catalog = await self._load_inbound_menu()
         kb = knowledge_context()
-        state = new_order_state()
+        state = dict(initial_state or new_order_state())
         history: list[dict[str, str]] = []
         detector = UtteranceDetector(
             threshold=260,
@@ -496,7 +524,13 @@ class AudioBridgeManager:
         reader_task = asyncio.create_task(self._audio_socket_to_queue(reader, incoming))
         local_time = datetime.now(RESTAURANT_TIMEZONE)
         day_part = "Доброе утро" if local_time.hour < 12 else ("Добрый день" if local_time.hour < 18 else "Добрый вечер")
-        greeting = f"{day_part}! На связи голосовой помощник Суши Хаус. Как я могу к вам обращаться?"
+        if state["customer_name"]:
+            greeting = (
+                f"{day_part}! На связи голосовой помощник Суши Хаус. "
+                f"{state['customer_name']}, оформим доставку или самовывоз?"
+            )
+        else:
+            greeting = f"{day_part}! На связи голосовой помощник Суши Хаус. Как я могу к вам обращаться?"
         save_inbound_state(call_id, state, f"Робот: {greeting}")
         try:
             await self._play_pcm(writer, await client.synthesize(greeting))
