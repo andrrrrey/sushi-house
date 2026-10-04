@@ -53,6 +53,25 @@ class MangoEventTests(unittest.TestCase):
         }))
         self.assertFalse(should_route_test_call(already_routed, enabled=True, test_phone="+79270120777", target_extension="225"))
 
+    def test_does_not_route_leg_created_by_previous_route_command(self):
+        event = parse_call_event(json.dumps({
+            "call_id": "new-leg", "seq": 1, "call_state": "Appeared", "location": "abonent",
+            "from": {"number": "79270120777", "taken_from_call_id": "original-leg"},
+            "to": {"number": "sip:user9@vpbx.example"},
+        }))
+        self.assertFalse(should_route_test_call(
+            event, enabled=True, test_phone="+79270120777", target_extension="225", target_sip_login="user9",
+        ))
+
+    def test_does_not_route_call_already_addressed_to_robot_sip_user(self):
+        event = parse_call_event(json.dumps({
+            "call_id": "robot-leg", "seq": 1, "call_state": "Appeared", "location": "abonent",
+            "from": {"number": "79270120777"}, "to": {"number": "sip:user9@vpbx.example"},
+        }))
+        self.assertFalse(should_route_test_call(
+            event, enabled=True, test_phone="+79270120777", target_extension="225", target_sip_login="user9",
+        ))
+
     def test_parses_route_result(self):
         self.assertEqual(parse_route_result('{"command_id":"cmd-1","result":1000}'), ("cmd-1", 1000))
 

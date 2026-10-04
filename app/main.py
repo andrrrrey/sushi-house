@@ -67,7 +67,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.10.1", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.10.2", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -590,7 +590,7 @@ async def mango_call_endpoint_status():
 async def mango_call_event(request: Request):
     settings = load_settings(
         "mango_vpbx_api_key", "mango_vpbx_api_salt", "mango_inbound_enabled",
-        "mango_test_phone", "mango_extension",
+        "mango_test_phone", "mango_extension", "mango_sip_login",
     )
     if not settings.get("mango_vpbx_api_key") or not settings.get("mango_vpbx_api_salt"):
         return JSONResponse({"status": "not_configured"}, status_code=503)
@@ -638,6 +638,7 @@ async def mango_call_event(request: Request):
                 enabled=settings.get("mango_inbound_enabled") == "on",
                 test_phone=settings.get("mango_test_phone", ""),
                 target_extension=route_target,
+                target_sip_login=settings.get("mango_sip_login", ""),
             ):
                 attempt = db.scalar(select(MangoRouteAttempt).where(MangoRouteAttempt.call_id == event.call_id))
                 if attempt is None:
@@ -931,6 +932,17 @@ async def update_setting(
                 else:
                     db.add(IntegrationSetting(key="yandex_voice_emotion", encrypted_value=fallback))
         db.add(AuditEvent(event_type="setting_updated", actor=user.username, details=setting_key))
+    if setting_key in {"mango_test_phone", "mango_inbound_enabled"}:
+        sip_settings = load_settings(
+            *SIP_REQUIRED_KEYS, "mango_sip_port", "mango_extension",
+            "mango_inbound_enabled", "mango_test_phone", "mango_operator_group",
+        )
+        if all(sip_settings.get(key) for key in SIP_REQUIRED_KEYS):
+            try:
+                apply_registration(sip_settings)
+            except SipError as exc:
+                error = quote_plus(f"Настройка сохранена, но SIP не применён: {exc}")
+                return RedirectResponse(f"/settings?error={error}", status_code=303)
     return RedirectResponse(f"/settings?saved={setting_key}", status_code=303)
 
 

@@ -51,6 +51,7 @@ class ParsedCallEvent:
     call_state: str
     location: str
     from_number: str
+    taken_from_call_id: str
     to_number: str
     to_extension: str
     line_number: str
@@ -88,6 +89,7 @@ def parse_call_event(raw_json: str) -> ParsedCallEvent:
         call_state=str(payload.get("call_state") or "Unknown")[:40],
         location=str(payload.get("location") or "")[:40],
         from_number=str(from_data.get("number") or "")[:160],
+        taken_from_call_id=str(from_data.get("taken_from_call_id") or "")[:128],
         to_number=str(to_data.get("number") or "")[:160],
         to_extension=str(to_data.get("extension") or "")[:40],
         line_number=str(to_data.get("line_number") or "")[:160],
@@ -102,12 +104,18 @@ def should_route_test_call(
     enabled: bool,
     test_phone: str,
     target_extension: str,
+    target_sip_login: str = "",
 ) -> bool:
     if not enabled or not phones_match(event.from_number, test_phone):
         return False
     if event.call_state.casefold() != "appeared":
         return False
+    if event.taken_from_call_id:
+        return False
     if event.to_extension.strip() == target_extension.strip():
+        return False
+    sip_user = target_sip_login.strip().removeprefix("sip:").split("@", 1)[0]
+    if sip_user and event.to_number.casefold().startswith(f"sip:{sip_user.casefold()}@"):
         return False
     location = event.location.casefold()
     return location == "queue" or location == "abonent" or location.startswith("ivr")

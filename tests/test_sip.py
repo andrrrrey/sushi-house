@@ -35,13 +35,15 @@ class SipConfigTests(unittest.TestCase):
     def test_inbound_context_is_enabled_only_for_configured_test_phone(self):
         settings = {
             "mango_sip_server": "vpbx123.mangosip.ru",
-            "mango_sip_login": "123/225",
+            "mango_sip_login": "user9",
             "mango_sip_password": "password",
+            "mango_extension": "225",
             "mango_inbound_enabled": "on",
             "mango_test_phone": "+79270120777",
         }
         self.assertIn("context=mango-inbound-test", render_pjsip_config(settings))
         dialplan = render_inbound_dialplan(settings)
+        self.assertIn("exten => user9,1,Goto(inbound,1)", dialplan)
         self.assertIn('"${CALLER_DIGITS:-10}"="9270120777"', dialplan)
         self.assertIn("AudioSocket(${AUDIO_UUID},app:9092)", dialplan)
 

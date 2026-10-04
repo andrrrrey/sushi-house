@@ -35,6 +35,7 @@ def test_prompt_is_multiline_and_defaults_are_safe_for_test_mode():
     assert len(SETTINGS_BY_KEY["yandex_voice"].choices) == 18
     assert SETTINGS_BY_KEY["yandex_voice_emotion"].default == "friendly"
     assert SETTINGS_BY_KEY["yandex_voice_speed"].default == "1.0"
+    assert SETTINGS_BY_KEY["mango_test_phone"].sensitive is False
 
 
 def test_voice_and_emotion_render_as_selects_and_speed_as_number():
