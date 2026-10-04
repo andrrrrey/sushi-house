@@ -32,9 +32,19 @@ def sign_payload(api_key: str, api_salt: str, raw_json: str) -> str:
 
 def normalize_phone(value: str) -> str:
     digits = re.sub(r"\D", "", value or "")
+    if len(digits) == 14 and digits.startswith("8107"):
+        return digits[3:]
     if len(digits) == 11 and digits.startswith("8"):
         return f"7{digits[1:]}"
     return digits
+
+
+def describe_route_result(result: int) -> str:
+    descriptions = {
+        4100: "Mango не допускает маршрутизацию для этого типа вызова",
+        4101: "Вызов завершился до обработки команды Mango либо call_id уже не существует",
+    }
+    return descriptions.get(result, f"Mango result code {result}")
 
 
 def phones_match(left: str, right: str) -> bool:

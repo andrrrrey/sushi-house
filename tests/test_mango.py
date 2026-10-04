@@ -5,10 +5,16 @@ from urllib.parse import parse_qs
 
 import httpx
 
-from app.mango import MangoClient, MangoEventError, parse_call_event, parse_route_result, should_route_test_call, verify_signature
+from app.mango import MangoClient, MangoEventError, describe_route_result, parse_call_event, parse_route_result, phones_match, should_route_test_call, verify_signature
 
 
 class MangoEventTests(unittest.TestCase):
+    def test_matches_mango_international_dialing_prefix(self):
+        self.assertTrue(phones_match("81079270120777", "+79270120777"))
+
+    def test_explains_expired_route_call(self):
+        self.assertIn("завершился", describe_route_result(4101))
+
     def test_verifies_mango_signature_over_original_json_string(self):
         api_key = "key"
         api_salt = "salt"

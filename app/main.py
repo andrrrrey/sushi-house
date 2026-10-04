@@ -22,6 +22,7 @@ from app.mango import (
     MangoApiError,
     MangoClient,
     MangoEventError,
+    describe_route_result,
     parse_call_event,
     parse_route_result,
     should_route_test_call,
@@ -67,7 +68,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.10.3", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.10.4", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -703,7 +704,7 @@ async def mango_route_result(request: Request):
         if attempt:
             attempt.result_code = result
             attempt.status = "succeeded" if result == 1000 else "failed"
-            attempt.error = "" if result == 1000 else f"Mango result code {result}"
+            attempt.error = "" if result == 1000 else describe_route_result(result)
             attempt.updated_at = datetime.now(UTC)
     return {"status": "accepted"}
 
