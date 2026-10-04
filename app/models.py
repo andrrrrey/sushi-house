@@ -57,6 +57,21 @@ class MangoCallEvent(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
+class MangoRouteAttempt(Base):
+    __tablename__ = "mango_route_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    call_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    command_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    target_extension: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(32), index=True, default="pending")
+    result_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=1)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class TestCall(Base):
     __tablename__ = "test_calls"
 

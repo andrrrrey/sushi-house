@@ -18,9 +18,17 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.db import Base, SessionLocal, engine
 from app.iiko import IikoClient, IikoError
-from app.mango import MangoEventError, parse_call_event, verify_signature
+from app.mango import (
+    MangoApiError,
+    MangoClient,
+    MangoEventError,
+    parse_call_event,
+    parse_route_result,
+    should_route_test_call,
+    verify_signature,
+)
 from app.knowledge_seed import seed_knowledge_base
-from app.models import AuditEvent, InboundCall, IntegrationSetting, KnowledgeEntry, MangoCallEvent, TestCall, User
+from app.models import AuditEvent, InboundCall, IntegrationSetting, KnowledgeEntry, MangoCallEvent, MangoRouteAttempt, TestCall, User
 from app.realtime import ACTIVE_CALL_STATES, RealtimeBridgeError, YandexVoiceClient, audio_bridge, pcm16_wav
 from app.security import decrypt_setting, encrypt_setting, get_csrf_token, hash_password, verify_csrf, verify_password
 from app.settings_catalog import SETTINGS, SETTINGS_BY_KEY
@@ -59,7 +67,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.10.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.10.1", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -265,6 +273,7 @@ async def calls_page(
         return user
     with SessionLocal() as db:
         records = db.scalars(select(MangoCallEvent).order_by(MangoCallEvent.received_at.desc()).limit(100)).all()
+        route_records = db.scalars(select(MangoRouteAttempt).order_by(MangoRouteAttempt.created_at.desc()).limit(20)).all()
         call_records = db.scalars(select(TestCall).order_by(TestCall.created_at.desc()).limit(20)).all()
     events = []
     for record in records:
@@ -282,6 +291,14 @@ async def calls_page(
     sip_status = registration_status()
     voice_settings = effective_voice_settings()
     inbound_settings = load_settings("mango_inbound_enabled")
+    route_attempts = [{
+        "created_at": record.created_at.strftime("%d.%m.%Y %H:%M:%S"),
+        "call_id": record.call_id,
+        "target": record.target_extension,
+        "status": record.status,
+        "result": record.result_code if record.result_code is not None else "—",
+        "error": record.error,
+    } for record in route_records]
     missing_voice_settings = []
     if not voice_settings.get("yandex_api_key"):
         missing_voice_settings.append("Yandex Cloud API Key")
@@ -331,6 +348,7 @@ async def calls_page(
             test_call_blockers=missing_voice_settings + ([] if sip_status.registered else ["регистрация Mango SIP"]),
             test_calls=test_calls,
             inbound_enabled=inbound_settings.get("mango_inbound_enabled") == "on",
+            route_attempts=route_attempts,
         ),
     )
 
@@ -570,8 +588,11 @@ async def mango_call_endpoint_status():
 
 @app.post("/mango/events/call")
 async def mango_call_event(request: Request):
-    settings = load_settings("mango_vpbx_api_key", "mango_vpbx_api_salt")
-    if len(settings) != 2:
+    settings = load_settings(
+        "mango_vpbx_api_key", "mango_vpbx_api_salt", "mango_inbound_enabled",
+        "mango_test_phone", "mango_extension",
+    )
+    if not settings.get("mango_vpbx_api_key") or not settings.get("mango_vpbx_api_salt"):
         return JSONResponse({"status": "not_configured"}, status_code=503)
     form = await request.form()
     received_key = str(form.get("vpbx_api_key") or "")
@@ -589,23 +610,100 @@ async def mango_call_event(request: Request):
         event = parse_call_event(raw_json)
     except MangoEventError as exc:
         return JSONResponse({"status": "invalid_event", "detail": str(exc)}, status_code=400)
+    route_command_id = ""
+    route_target = settings.get("mango_extension", "225").strip() or "225"
+    duplicate = False
     try:
         with SessionLocal.begin() as db:
-            db.add(MangoCallEvent(
-                entry_id=event.entry_id,
-                call_id=event.call_id,
-                sequence=event.sequence,
-                call_state=event.call_state,
-                location=event.location,
-                from_number_encrypted=encrypt_setting(event.from_number) if event.from_number else "",
-                to_number_encrypted=encrypt_setting(event.to_number) if event.to_number else "",
-                to_extension=event.to_extension,
-                line_number=event.line_number,
-                disconnect_reason=event.disconnect_reason,
-                event_timestamp=event.event_timestamp,
-            ))
+            duplicate = db.scalar(select(MangoCallEvent.id).where(
+                MangoCallEvent.call_id == event.call_id,
+                MangoCallEvent.sequence == event.sequence,
+            )) is not None
+            if not duplicate:
+                db.add(MangoCallEvent(
+                    entry_id=event.entry_id,
+                    call_id=event.call_id,
+                    sequence=event.sequence,
+                    call_state=event.call_state,
+                    location=event.location,
+                    from_number_encrypted=encrypt_setting(event.from_number) if event.from_number else "",
+                    to_number_encrypted=encrypt_setting(event.to_number) if event.to_number else "",
+                    to_extension=event.to_extension,
+                    line_number=event.line_number,
+                    disconnect_reason=event.disconnect_reason,
+                    event_timestamp=event.event_timestamp,
+                ))
+            if should_route_test_call(
+                event,
+                enabled=settings.get("mango_inbound_enabled") == "on",
+                test_phone=settings.get("mango_test_phone", ""),
+                target_extension=route_target,
+            ):
+                attempt = db.scalar(select(MangoRouteAttempt).where(MangoRouteAttempt.call_id == event.call_id))
+                if attempt is None:
+                    route_command_id = f"sushi-house-inbound-{uuid.uuid4()}"
+                    db.add(MangoRouteAttempt(
+                        call_id=event.call_id,
+                        command_id=route_command_id,
+                        target_extension=route_target,
+                    ))
+                elif attempt.status == "failed" and attempt.attempts < 3:
+                    route_command_id = f"sushi-house-inbound-{uuid.uuid4()}"
+                    attempt.command_id = route_command_id
+                    attempt.status = "pending"
+                    attempt.result_code = None
+                    attempt.error = ""
+                    attempt.attempts += 1
+                    attempt.updated_at = datetime.now(UTC)
     except IntegrityError:
+        logger.warning("Concurrent duplicate Mango event %s/%s", event.call_id, event.sequence)
         return {"status": "duplicate"}
+    if route_command_id:
+        try:
+            async with MangoClient(settings["mango_vpbx_api_key"], settings["mango_vpbx_api_salt"]) as client:
+                await client.route_call(event.call_id, route_target, route_command_id)
+            with SessionLocal.begin() as db:
+                attempt = db.scalar(select(MangoRouteAttempt).where(MangoRouteAttempt.command_id == route_command_id))
+                if attempt and attempt.status == "pending":
+                    attempt.status = "requested"
+                    attempt.updated_at = datetime.now(UTC)
+            logger.info("Mango route requested for call %s to extension %s", event.call_id, route_target)
+        except MangoApiError as exc:
+            with SessionLocal.begin() as db:
+                attempt = db.scalar(select(MangoRouteAttempt).where(MangoRouteAttempt.command_id == route_command_id))
+                if attempt:
+                    attempt.status = "failed"
+                    attempt.error = str(exc)[:1000]
+                    attempt.updated_at = datetime.now(UTC)
+            logger.warning("Mango route failed for call %s: %s", event.call_id, exc)
+    return {
+        "status": "duplicate" if duplicate else "accepted",
+        "route": "requested" if route_command_id else "not_applicable",
+    }
+
+
+@app.post("/mango/result/route")
+async def mango_route_result(request: Request):
+    settings = load_settings("mango_vpbx_api_key", "mango_vpbx_api_salt")
+    if len(settings) != 2:
+        return JSONResponse({"status": "not_configured"}, status_code=503)
+    form = await request.form()
+    received_key = str(form.get("vpbx_api_key") or "")
+    signature = str(form.get("sign") or "")
+    raw_json = str(form.get("json") or "")
+    if not verify_signature(settings["mango_vpbx_api_key"], settings["mango_vpbx_api_salt"], received_key, raw_json, signature):
+        return JSONResponse({"status": "invalid_signature"}, status_code=401)
+    try:
+        command_id, result = parse_route_result(raw_json)
+    except MangoEventError as exc:
+        return JSONResponse({"status": "invalid_result", "detail": str(exc)}, status_code=400)
+    with SessionLocal.begin() as db:
+        attempt = db.scalar(select(MangoRouteAttempt).where(MangoRouteAttempt.command_id == command_id))
+        if attempt:
+            attempt.result_code = result
+            attempt.status = "succeeded" if result == 1000 else "failed"
+            attempt.error = "" if result == 1000 else f"Mango result code {result}"
+            attempt.updated_at = datetime.now(UTC)
     return {"status": "accepted"}
 
 

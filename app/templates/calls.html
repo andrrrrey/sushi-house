@@ -47,6 +47,19 @@
     {% endif %}
   </section>
   <section class="soft-card result-card">
+    <div class="section-heading"><div><span>Условная маршрутизация · только тестовый номер</span><h2>Перехват входящих на 225</h2></div><span class="quiet-chip">{{ route_attempts|length }}</span></div>
+    {% if route_attempts %}
+    <div class="data-table-wrap"><table class="data-table">
+      <thead><tr><th>Создано</th><th>Вызов</th><th>Назначение</th><th>Статус</th><th>Код Mango</th><th>Ошибка</th></tr></thead>
+      <tbody>{% for attempt in route_attempts %}<tr>
+        <td>{{ attempt.created_at }}</td><td><code>{{ attempt.call_id }}</code></td><td>{{ attempt.target }}</td><td><strong>{{ attempt.status }}</strong></td><td>{{ attempt.result }}</td><td>{{ attempt.error or '—' }}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}
+    <div class="empty-state"><strong>Перехватов пока не было</strong><p>Вызов с сохранённого тестового номера будет перенаправлен на внутренний номер робота. Остальные звонки продолжат идти по действующей схеме Mango.</p></div>
+    {% endif %}
+  </section>
+  <section class="soft-card result-card">
     <div class="section-heading"><div><span>Последние 20 запусков</span><h2>Тестовый контур</h2></div><span class="quiet-chip">{{ test_calls|length }}</span></div>
     {% if test_calls %}
     <div class="test-call-list">
