@@ -77,6 +77,86 @@ def new_order_state() -> dict[str, Any]:
     }
 
 
+ORDER_FIELDS = ("customer_name", "service_type", "items", "address", "pickup_point", "payment_method", "confirmed")
+
+
+def order_dialog_step(state: dict[str, Any]) -> str:
+    if str(state.get("intent") or "new_order") != "new_order" or state.get("operator_required"):
+        return "other"
+    if not str(state.get("customer_name") or "").strip():
+        return "name"
+    if state.get("service_type") not in {"delivery", "pickup"}:
+        return "service_type"
+    if not state.get("items"):
+        return "items"
+    if state["service_type"] == "delivery" and not str(state.get("address") or "").strip():
+        return "address"
+    if state["service_type"] == "pickup" and not str(state.get("pickup_point") or "").strip():
+        return "pickup_point"
+    if not str(state.get("payment_method") or "").strip():
+        return "payment"
+    if not state.get("confirmed"):
+        return "confirmation"
+    return "complete"
+
+
+def constrain_order_progress(previous: dict[str, Any], proposed: dict[str, Any]) -> dict[str, Any]:
+    """Accept only the field requested on this turn; later details are collected separately."""
+    if previous.get("intent", "new_order") != "new_order" or proposed.get("intent", "new_order") != "new_order":
+        return proposed
+    step = order_dialog_step(previous)
+    allowed = {
+        "name": {"customer_name"},
+        "service_type": {"service_type"},
+        "items": {"items"},
+        "address": {"address"},
+        "pickup_point": {"pickup_point"},
+        "payment": {"payment_method"},
+        "confirmation": set(ORDER_FIELDS),
+        "complete": set(ORDER_FIELDS),
+    }.get(step, set())
+    result = dict(proposed)
+    for key in ORDER_FIELDS:
+        if key not in allowed:
+            result[key] = previous.get(key)
+    if step not in {"confirmation", "complete"}:
+        result["confirmed"] = False
+    return result
+
+
+def next_order_reply(state: dict[str, Any]) -> str | None:
+    step = order_dialog_step(state)
+    name = str(state.get("customer_name") or "").strip()
+    prefix = f"{name}, " if name else ""
+    if step == "other":
+        return None
+    if step == "name":
+        return "Как я могу к вам обращаться?"
+    if step == "service_type":
+        return f"{prefix}оформим доставку или самовывоз?"
+    if step == "items":
+        return "Что хотите заказать?"
+    if step == "address":
+        return "Назовите, пожалуйста, адрес доставки."
+    if step == "pickup_point":
+        return "Из какой точки Суши Хаус вам будет удобно забрать заказ?"
+    if step == "payment":
+        return "Как вам будет удобно оплатить заказ?"
+    if step == "confirmation":
+        items = ", ".join(
+            f"{int(item.get('quantity') or 1)} — {item.get('name')}"
+            for item in state.get("items") or []
+            if isinstance(item, dict) and item.get("name")
+        )
+        fulfillment = (
+            f"доставка по адресу {state.get('address')}"
+            if state.get("service_type") == "delivery"
+            else f"самовывоз из точки {state.get('pickup_point')}"
+        )
+        return f"{prefix}повторяю заказ: {items}. {fulfillment}. Оплата: {state.get('payment_method')}. Всё верно?"
+    return f"{prefix}спасибо, я зафиксировала заказ в тестовом журнале."
+
+
 def parse_structured_response(raw: str, previous: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     cleaned = raw.strip()
     if cleaned.startswith("```"):

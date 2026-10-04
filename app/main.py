@@ -68,7 +68,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.10.4", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.11.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[

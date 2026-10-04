@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.iiko import IikoClient, IikoError, IikoOrderSnapshot, RESTAURANT_TIMEZONE
-from app.inbound import knowledge_context, menu_candidates, new_order_state, parse_structured_response, save_inbound_state, validate_order_items
+from app.inbound import constrain_order_progress, knowledge_context, menu_candidates, new_order_state, next_order_reply, order_dialog_step, parse_structured_response, save_inbound_state, validate_order_items
 from app.models import InboundCall, IntegrationSetting, TestCall
 from app.security import decrypt_setting
 from app.settings_catalog import SETTINGS_BY_KEY
@@ -270,8 +270,11 @@ class YandexVoiceClient:
             '"operator_required":false,"transfer_reason":""}}. '
             "Каждый раз возвращай полное актуальное состояние. Позицию можно добавить только если она есть в кандидатах меню ниже; "
             "сохраняй точные item_id и name. Если подходящей позиции нет или совпадение неоднозначно — уточни, не добавляй. "
+            "Веди новый заказ строго пошагово и задавай ровно один короткий вопрос за реплику. Не перечисляй клиенту будущие вопросы "
+            "и не проси одновременно назвать имя, тип получения, заказ, адрес и оплату. "
             "Не называй срок доставки, если его нет в базе. Не обещай компенсацию. При подтверждении повтори состав, количество, "
             "тип получения, адрес/точку и оплату. Ничего не отправляй в iiko.\n\n"
+            f"Текущий шаг диалога: {order_dialog_step(state)}. Обрабатывай прежде всего ответ на этот шаг.\n\n"
             f"Текущее состояние: {json.dumps(state, ensure_ascii=False)}\n\n"
             f"Кандидаты действующего меню iiko:\n{chr(10).join(menu_lines) if menu_lines else '- совпадений пока нет'}\n\n"
             f"Проверенная база знаний:\n{kb_context}"
@@ -482,12 +485,18 @@ class AudioBridgeManager:
         kb = knowledge_context()
         state = new_order_state()
         history: list[dict[str, str]] = []
-        detector = UtteranceDetector()
+        detector = UtteranceDetector(
+            threshold=260,
+            silence_frames=75,
+            minimum_frames=15,
+            maximum_frames=1500,
+            pre_roll_frames=15,
+        )
         incoming: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=500)
         reader_task = asyncio.create_task(self._audio_socket_to_queue(reader, incoming))
         local_time = datetime.now(RESTAURANT_TIMEZONE)
         day_part = "Доброе утро" if local_time.hour < 12 else ("Добрый день" if local_time.hour < 18 else "Добрый вечер")
-        greeting = f"{day_part}! На связи голосовой помощник Суши Хаус. Представьтесь, пожалуйста, и скажите: оформим доставку или самовывоз?"
+        greeting = f"{day_part}! На связи голосовой помощник Суши Хаус. Как я могу к вам обращаться?"
         save_inbound_state(call_id, state, f"Робот: {greeting}")
         try:
             await self._play_pcm(writer, await client.synthesize(greeting))
@@ -506,9 +515,14 @@ class AudioBridgeManager:
                         continue
                     save_inbound_state(call_id, state, f"Абонент: {recognized}")
                     history.append({"role": "user", "text": recognized})
+                    previous_state = state
                     raw = await client.complete_inbound(history, state, menu_candidates(recognized, catalog), kb)
                     answer, state = parse_structured_response(raw, state)
+                    state = constrain_order_progress(previous_state, state)
                     state = validate_order_items(state, catalog)
+                    staged_answer = next_order_reply(state)
+                    if staged_answer is not None:
+                        answer = staged_answer
                     if not answer:
                         answer = "Извините, я не расслышала. Повторите, пожалуйста."
                     history.append({"role": "assistant", "text": answer})
