@@ -8,6 +8,9 @@ install -d -o 100 -g 101 -m 0770 /runtime/asterisk
 if [ ! -e /runtime/asterisk/pjsip_mango.conf ]; then
   install -o 100 -g 101 -m 0640 /dev/null /runtime/asterisk/pjsip_mango.conf
 fi
+if [ ! -e /runtime/asterisk/extensions_mango.conf ]; then
+  install -o 100 -g 101 -m 0640 /dev/null /runtime/asterisk/extensions_mango.conf
+fi
 
 envsubst '${PUBLIC_IP}' < /opt/asterisk-config/pjsip.conf.template > /etc/asterisk/pjsip.conf
 envsubst '${ASTERISK_AMI_SECRET}' < /opt/asterisk-config/manager.conf.template > /etc/asterisk/manager.conf

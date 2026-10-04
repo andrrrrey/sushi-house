@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}База знаний · Sushi House{% endblock %}
+{% block content %}
+<main class="glass-panel settings-panel">
+  <section class="hero-row compact">
+    <div><div class="eyebrow">Правила голосового оператора</div><h1>База знаний</h1><p>Эти записи можно дополнять и исправлять без изменения кода.</p></div>
+    <span class="quiet-chip {{ 'wait' if review_count else 'ok' }}">{{ review_count }} требуют уточнения</span>
+  </section>
+  {% if saved %}<div class="notice success">Изменения сохранены.</div>{% endif %}
+  {% if review_count %}<div class="notice error">Спорные правила не используются как безусловные ответы робота, пока отметка «Требует уточнения» не снята.</div>{% endif %}
+  <details class="soft-card knowledge-create">
+    <summary>Добавить новое правило</summary>
+    <form method="post" action="/knowledge/new" class="knowledge-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Категория<input name="category" required maxlength="80"></label>
+      <label>Заголовок<input name="title" required maxlength="240"></label>
+      <label class="wide">Ответ / правило<textarea name="content" required rows="5" maxlength="12000"></textarea></label>
+      <label class="wide">Следующее действие<textarea name="next_action" rows="2" maxlength="4000"></textarea></label>
+      <label class="wide">Теги<input name="tags" maxlength="1000"></label>
+      <button class="cream-button" type="submit">Добавить правило</button>
+    </form>
+  </details>
+  {% for category, entries in categories.items() %}
+  <section class="soft-card knowledge-group">
+    <div class="section-heading"><h2>{{ category }}</h2><span>{{ entries|length }}</span></div>
+    <div class="knowledge-list">
+      {% for entry in entries %}
+      <details class="knowledge-entry {{ 'needs-review' if entry.needs_review else '' }}">
+        <summary><span>{{ entry.title }}</span><small>{{ 'Требует уточнения' if entry.needs_review else ('Активно' if entry.enabled else 'Выключено') }}</small></summary>
+        <form method="post" action="/knowledge/{{ entry.id }}" class="knowledge-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label>Категория<input name="category" value="{{ entry.category }}" required maxlength="80"></label>
+          <label>Заголовок<input name="title" value="{{ entry.title }}" required maxlength="240"></label>
+          <label class="wide">Ответ / правило<textarea name="content" rows="6" required maxlength="12000">{{ entry.content }}</textarea></label>
+          <label class="wide">Следующее действие<textarea name="next_action" rows="3" maxlength="4000">{{ entry.next_action }}</textarea></label>
+          <label class="wide">Теги<input name="tags" value="{{ entry.tags }}" maxlength="1000"></label>
+          <div class="knowledge-checks wide">
+            <label><input type="checkbox" name="enabled" {{ 'checked' if entry.enabled else '' }}> Использовать</label>
+            <label><input type="checkbox" name="needs_review" {{ 'checked' if entry.needs_review else '' }}> Требует уточнения</label>
+            <small>Источник: {{ entry.source_sheet }}{% if entry.source_rows %}, строки {{ entry.source_rows }}{% endif %}</small>
+          </div>
+          <button class="cream-button" type="submit">Сохранить</button>
+        </form>
+      </details>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+</main>
+{% endblock %}

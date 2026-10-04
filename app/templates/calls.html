@@ -3,7 +3,7 @@
 {% block content %}
 <main class="glass-panel settings-panel">
   <section class="hero-row compact">
-    <div><div class="eyebrow">Mango Office</div><h1>Телефония</h1><p>SIP-регистрация и подписанные события без боевого запуска робота.</p></div>
+    <div><div class="eyebrow">Mango Office</div><h1>Телефония</h1><p>SIP-регистрация, тестовые входящие и подписанные события без боевого запуска.</p></div>
     <span class="quiet-chip {{ 'ok' if sip_status.registered else 'wait' }}">{{ sip_status.label }}</span>
   </section>
   {% if sip_saved %}<div class="notice success">SIP: {{ sip_saved }}</div>{% endif %}
@@ -20,7 +20,7 @@
     </div>
     <div class="sip-summary">
       <div><span>Регистрация</span><strong>{{ sip_status.label }}</strong></div>
-      <div><span>Входящие</span><strong>Заблокированы</strong></div>
+      <div><span>Входящие</span><strong>{{ 'Только тестовый номер' if inbound_enabled else 'Заблокированы' }}</strong></div>
       <div><span>Кодек</span><strong>G.711A</strong></div>
       <div><span>RTP</span><strong>10000–10100 UDP</strong></div>
     </div>

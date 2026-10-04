@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Входящие · Sushi House{% endblock %}
+{% block content %}
+<main class="glass-panel settings-panel">
+  <section class="hero-row compact">
+    <div><div class="eyebrow">Тестовый входящий контур</div><h1>Принятые обращения</h1><p>Расшифровка, реплики робота и локальный черновик заказа.</p></div>
+    <span class="quiet-chip {{ 'ok' if enabled else 'wait' }}">{{ 'Включён' if enabled else 'Выключен' }}</span>
+  </section>
+  <section class="soft-card inbound-guard">
+    <div><span>Разрешённый номер</span><strong>{{ test_phone }}</strong></div>
+    <div><span>Перевод оператору</span><strong>через {{ transfer_delay }} сек.</strong></div>
+    <div><span>Запись в iiko</span><strong>заблокирована</strong></div>
+    <div><span>Режим</span><strong>доставка + самовывоз</strong></div>
+  </section>
+  <section class="soft-card result-card">
+    <div class="section-heading"><div><span>Последние 100</span><h2>Журнал звонков</h2></div><span class="quiet-chip">{{ calls|length }}</span></div>
+    {% if calls %}
+    <div class="inbound-list">
+      {% for call in calls %}
+      <details class="inbound-call">
+        <summary>
+          <span><strong>{{ call.created_at }} · {{ call.customer_name }}</strong><small>{{ call.phone }} · {{ call.service_type }} · {{ call.intent }}</small></span>
+          <span class="quiet-chip">{{ call.result }}</span>
+        </summary>
+        <div class="inbound-details">
+          <div><span>Адрес / точка</span><strong>{{ call.address }}</strong></div>
+          <div><span>Оплата</span><strong>{{ call.payment }}</strong></div>
+          <div><span>Статус</span><strong>{{ call.status }}</strong></div>
+          <div><span>ID</span><code>{{ call.id }}</code></div>
+        </div>
+        {% if call.draft %}<h3>Черновик заказа</h3><pre>{{ call.draft|tojson(indent=2) }}</pre>{% endif %}
+        {% if call.transcript %}<h3>Диалог</h3><pre>{{ call.transcript }}</pre>{% endif %}
+        {% if call.error %}<p class="call-error">{{ call.error }}</p>{% endif %}
+      </details>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state"><strong>Входящих тестовых звонков пока нет</strong><p>После включения контура в настройках и маршрутизации Mango здесь появятся диалоги и локальные черновики. В iiko ничего отправляться не будет.</p></div>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

@@ -13,6 +13,7 @@ services:
       ASTERISK_AMI_USER: voice_robot
       ASTERISK_AMI_SECRET: ${ASTERISK_AMI_SECRET}
       ASTERISK_DYNAMIC_CONFIG: /runtime/asterisk/pjsip_mango.conf
+      ASTERISK_DYNAMIC_DIALPLAN: /runtime/asterisk/extensions_mango.conf
       AUDIO_SOCKET_HOST: 0.0.0.0
       AUDIO_SOCKET_PORT: 9092
     ports:

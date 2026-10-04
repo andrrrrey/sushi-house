@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 import asyncio
 from datetime import UTC, date, datetime, timedelta
 import logging
+import json
 import os
 from urllib.parse import quote_plus
 import uuid
@@ -18,7 +19,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.db import Base, SessionLocal, engine
 from app.iiko import IikoClient, IikoError
 from app.mango import MangoEventError, parse_call_event, verify_signature
-from app.models import AuditEvent, IntegrationSetting, MangoCallEvent, TestCall, User
+from app.knowledge_seed import seed_knowledge_base
+from app.models import AuditEvent, InboundCall, IntegrationSetting, KnowledgeEntry, MangoCallEvent, TestCall, User
 from app.realtime import ACTIVE_CALL_STATES, RealtimeBridgeError, YandexVoiceClient, audio_bridge, pcm16_wav
 from app.security import decrypt_setting, encrypt_setting, get_csrf_token, hash_password, verify_csrf, verify_password
 from app.settings_catalog import SETTINGS, SETTINGS_BY_KEY
@@ -34,10 +36,16 @@ test_call_start_lock = asyncio.Lock()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
+    inserted = seed_knowledge_base()
+    if inserted:
+        logger.info("Seeded %s knowledge base entries", inserted)
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))
     try:
-        sip_settings = load_settings(*SIP_REQUIRED_KEYS, "mango_sip_port", "mango_extension")
+        sip_settings = load_settings(
+            *SIP_REQUIRED_KEYS, "mango_sip_port", "mango_extension",
+            "mango_inbound_enabled", "mango_test_phone", "mango_operator_group",
+        )
         if all(sip_settings.get(key) for key in SIP_REQUIRED_KEYS):
             status = apply_registration(sip_settings)
             logger.info("Mango SIP startup status: %s", status.state)
@@ -51,7 +59,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.9.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.10.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -122,11 +130,12 @@ def effective_voice_settings() -> dict[str, str]:
         "yandex_voice_emotion",
         "yandex_voice_speed",
         "yandex_system_prompt",
+        "inbound_order_prompt",
         "mango_test_phone",
         "mango_outbound_number",
     )
     values = load_settings(*keys)
-    for key in ("yandex_gpt_model", "yandex_voice", "yandex_voice_emotion", "yandex_voice_speed", "yandex_system_prompt"):
+    for key in ("yandex_gpt_model", "yandex_voice", "yandex_voice_emotion", "yandex_voice_speed", "yandex_system_prompt", "inbound_order_prompt"):
         values.setdefault(key, SETTINGS_BY_KEY[key].default)
     return values
 
@@ -237,7 +246,7 @@ async def dashboard(request: Request):
             services=[
                 {"name": "Сервер", "state": "Работает", "tone": "ok", "meta": "FastAPI · PostgreSQL"},
                 {"name": "iikoCloud", "state": "Готов к проверке" if {"iiko_api_login", "iiko_app_id", "iiko_client_secret"}.issubset(configured) else "Ожидает настройки", "tone": "ok" if {"iiko_api_login", "iiko_app_id", "iiko_client_secret"}.issubset(configured) else "wait", "meta": "Чтение без изменений"},
-                {"name": "Mango SIP", "state": sip_status.label, "tone": "ok" if sip_status.registered else "wait", "meta": "PJSIP · входящие заблокированы"},
+                {"name": "Mango SIP", "state": sip_status.label, "tone": "ok" if sip_status.registered else "wait", "meta": "PJSIP · тестовый входящий контур"},
             ],
         ),
     )
@@ -272,6 +281,7 @@ async def calls_page(
     sip_settings = load_settings(*SIP_REQUIRED_KEYS)
     sip_status = registration_status()
     voice_settings = effective_voice_settings()
+    inbound_settings = load_settings("mango_inbound_enabled")
     missing_voice_settings = []
     if not voice_settings.get("yandex_api_key"):
         missing_voice_settings.append("Yandex Cloud API Key")
@@ -320,6 +330,7 @@ async def calls_page(
             test_call_ready=sip_status.registered and not missing_voice_settings,
             test_call_blockers=missing_voice_settings + ([] if sip_status.registered else ["регистрация Mango SIP"]),
             test_calls=test_calls,
+            inbound_enabled=inbound_settings.get("mango_inbound_enabled") == "on",
         ),
     )
 
@@ -339,7 +350,10 @@ async def mango_sip_apply(request: Request, csrf_token: str = Form(...)):
     user = require_user(request)
     if isinstance(user, RedirectResponse):
         return user
-    settings = load_settings(*SIP_REQUIRED_KEYS, "mango_sip_port", "mango_extension")
+    settings = load_settings(
+        *SIP_REQUIRED_KEYS, "mango_sip_port", "mango_extension",
+        "mango_inbound_enabled", "mango_test_phone", "mango_operator_group",
+    )
     try:
         status = apply_registration(settings)
     except SipError as exc:
@@ -348,6 +362,129 @@ async def mango_sip_apply(request: Request, csrf_token: str = Form(...)):
     with SessionLocal.begin() as db:
         db.add(AuditEvent(event_type="mango_sip_applied", actor=user.username, details=status.state))
     return RedirectResponse(f"/calls?sip_saved={quote_plus(status.label)}", status_code=303)
+
+
+@app.get("/knowledge", response_class=HTMLResponse)
+async def knowledge_page(request: Request, saved: str | None = None):
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    with SessionLocal() as db:
+        entries = db.scalars(
+            select(KnowledgeEntry).order_by(KnowledgeEntry.sort_order, KnowledgeEntry.category, KnowledgeEntry.title)
+        ).all()
+    categories: dict[str, list[KnowledgeEntry]] = {}
+    for entry in entries:
+        categories.setdefault(entry.category, []).append(entry)
+    return templates.TemplateResponse(
+        request=request,
+        name="knowledge.html",
+        context=page_context(
+            request, user=user, active="knowledge", categories=categories,
+            saved=saved, review_count=sum(item.needs_review for item in entries),
+        ),
+    )
+
+
+@app.post("/knowledge/new")
+async def knowledge_create(
+    request: Request,
+    category: str = Form(...),
+    title: str = Form(...),
+    content: str = Form(...),
+    next_action: str = Form(""),
+    tags: str = Form(""),
+    csrf_token: str = Form(...),
+):
+    verify_csrf(request, csrf_token)
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    if not category.strip() or not title.strip() or not content.strip():
+        raise HTTPException(status_code=422, detail="Категория, заголовок и содержание обязательны")
+    with SessionLocal.begin() as db:
+        entry = KnowledgeEntry(
+            seed_key=f"manual-{uuid.uuid4()}", category=category.strip()[:80], title=title.strip()[:240],
+            content=content.strip()[:12000], next_action=next_action.strip()[:4000], tags=tags.strip()[:1000],
+            source_sheet="Создано в админке", source_rows="", sort_order=500,
+        )
+        db.add(entry)
+        db.add(AuditEvent(event_type="knowledge_created", actor=user.username, details=title.strip()[:240]))
+    return RedirectResponse("/knowledge?saved=created", status_code=303)
+
+
+@app.post("/knowledge/{entry_id}")
+async def knowledge_update(
+    entry_id: int,
+    request: Request,
+    category: str = Form(...),
+    title: str = Form(...),
+    content: str = Form(...),
+    next_action: str = Form(""),
+    tags: str = Form(""),
+    enabled: str | None = Form(None),
+    needs_review: str | None = Form(None),
+    csrf_token: str = Form(...),
+):
+    verify_csrf(request, csrf_token)
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    with SessionLocal.begin() as db:
+        entry = db.get(KnowledgeEntry, entry_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail="Запись базы знаний не найдена")
+        entry.category = category.strip()[:80]
+        entry.title = title.strip()[:240]
+        entry.content = content.strip()[:12000]
+        entry.next_action = next_action.strip()[:4000]
+        entry.tags = tags.strip()[:1000]
+        entry.enabled = enabled == "on"
+        entry.needs_review = needs_review == "on"
+        entry.updated_at = datetime.now(UTC)
+        db.add(AuditEvent(event_type="knowledge_updated", actor=user.username, details=str(entry_id)))
+    return RedirectResponse(f"/knowledge?saved={entry_id}", status_code=303)
+
+
+@app.get("/inbound", response_class=HTMLResponse)
+async def inbound_page(request: Request):
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    with SessionLocal() as db:
+        records = db.scalars(select(InboundCall).order_by(InboundCall.created_at.desc()).limit(100)).all()
+    calls = []
+    for record in records:
+        try:
+            draft = json.loads(record.draft_order or "{}")
+        except ValueError:
+            draft = {}
+        calls.append({
+            "id": record.id,
+            "created_at": record.created_at.strftime("%d.%m.%Y %H:%M:%S"),
+            "status": record.status,
+            "phone": mask_phone(decrypt_setting(record.phone_encrypted)) if record.phone_encrypted else "тестовый номер",
+            "customer_name": record.customer_name or "—",
+            "intent": record.intent,
+            "service_type": {"delivery": "Доставка", "pickup": "Самовывоз"}.get(record.service_type, "—"),
+            "payment": record.payment_method or "—",
+            "address": record.address or "—",
+            "result": record.result,
+            "transcript": record.transcript,
+            "draft": draft,
+            "error": record.error,
+        })
+    inbound_settings = load_settings("mango_inbound_enabled", "mango_test_phone", "mango_transfer_delay_seconds")
+    return templates.TemplateResponse(
+        request=request,
+        name="inbound.html",
+        context=page_context(
+            request, user=user, active="inbound", calls=calls,
+            enabled=inbound_settings.get("mango_inbound_enabled", "off") == "on",
+            test_phone=mask_phone(inbound_settings.get("mango_test_phone", "")) if inbound_settings.get("mango_test_phone") else "—",
+            transfer_delay=inbound_settings.get("mango_transfer_delay_seconds", SETTINGS_BY_KEY["mango_transfer_delay_seconds"].default),
+        ),
+    )
 
 
 @app.post("/calls/test/start")
@@ -662,6 +799,15 @@ async def update_setting(
             error = quote_plus("Скорость голоса должна быть от 0.1 до 3.0")
             return RedirectResponse(f"/settings?error={error}", status_code=303)
         value = f"{speed:.1f}"
+    if setting_key == "mango_transfer_delay_seconds":
+        try:
+            delay = int(value)
+        except ValueError:
+            delay = -1
+        if not 0 <= delay <= 300:
+            error = quote_plus("Задержка перевода должна быть от 0 до 300 секунд")
+            return RedirectResponse(f"/settings?error={error}", status_code=303)
+        value = str(delay)
     if setting_key == "yandex_voice_emotion":
         selected_voice = load_settings("yandex_voice").get("yandex_voice", SETTINGS_BY_KEY["yandex_voice"].default)
         if not role_supported(selected_voice, value):

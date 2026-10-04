@@ -17,6 +17,9 @@ def test_voice_robot_settings_are_available():
         "yandex_voice_speed",
         "yandex_system_prompt",
         "mango_test_phone",
+        "mango_inbound_enabled",
+        "mango_transfer_delay_seconds",
+        "inbound_order_prompt",
     }
 
     assert expected.issubset(SETTINGS_BY_KEY)

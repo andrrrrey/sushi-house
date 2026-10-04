@@ -145,7 +145,6 @@ class IikoOrderSnapshot:
             f"У вас: {self.spoken_items()}. {self.spoken_total()} {delivery} "
             f"{self.spoken_payment()} {customer}, подскажите, пожалуйста, заказ, адрес и способ оплаты указаны верно?"
         )
-
     def prompt_context(self) -> str:
         return (
             "Исходные данные тестового заказа:\n"
@@ -168,6 +167,14 @@ class IikoOrderSnapshot:
             "Если клиент подтверждает, скажи, что подтверждение "
             "зафиксировано только в тестовом журнале и не отправлено в iiko."
         )
+
+
+@dataclass(frozen=True)
+class IikoMenuItem:
+    item_id: str
+    name: str
+    price: float | None
+    category: str
 
 
 class IikoClient:
@@ -262,6 +269,48 @@ class IikoClient:
                         payment_methods=self._parse_payment_methods(order),
                     ))
         return max(candidates, key=lambda item: item.confirmed_at) if candidates else None
+
+    async def external_menu_items(self) -> list[IikoMenuItem]:
+        """Load the published external menu without modifying iiko."""
+        organizations = (await self.post("/api/1/organizations", {})).get("organizations", [])
+        organization_ids = [item.get("id") for item in organizations if item.get("id")]
+        menu_meta = await self.post("/api/2/menu", {})
+        external_menus = menu_meta.get("externalMenus") or []
+        if not external_menus:
+            raise IikoError("В iiko не опубликовано внешнее меню")
+        preferred = next((item for item in external_menus if "стартер" in str(item.get("name", "")).casefold()), external_menus[0])
+        price_categories = menu_meta.get("priceCategories") or []
+        payload: dict[str, Any] = {
+            "externalMenuId": str(preferred["id"]),
+            "organizationIds": organization_ids,
+        }
+        if price_categories and price_categories[0].get("id"):
+            payload["priceCategoryId"] = price_categories[0]["id"]
+        data = await self.post("/api/2/menu/by_id", payload)
+        result: list[IikoMenuItem] = []
+        seen: set[tuple[str, str]] = set()
+        for category in data.get("itemCategories") or []:
+            category_name = str(category.get("name") or "Без категории")
+            for item in category.get("items") or []:
+                if item.get("isHidden"):
+                    continue
+                item_id = str(item.get("itemId") or "")
+                name = str(item.get("name") or "").strip()
+                if not item_id or not name:
+                    continue
+                key = (item_id, name.casefold())
+                if key in seen:
+                    continue
+                seen.add(key)
+                price = None
+                for size in item.get("itemSizes") or []:
+                    prices = size.get("prices") or []
+                    priced = next((entry.get("price") for entry in prices if entry.get("price") is not None), None)
+                    if priced is not None:
+                        price = float(priced)
+                        break
+                result.append(IikoMenuItem(item_id=item_id, name=name, price=price, category=category_name))
+        return result
 
     @staticmethod
     def _parse_iiko_datetime(value: str) -> datetime | None:

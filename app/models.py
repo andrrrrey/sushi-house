@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -68,4 +68,43 @@ class TestCall(Base):
     error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class KnowledgeEntry(Base):
+    __tablename__ = "knowledge_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    seed_key: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    category: Mapped[str] = mapped_column(String(80), index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    content: Mapped[str] = mapped_column(Text)
+    next_action: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    source_sheet: Mapped[str] = mapped_column(String(120), default="")
+    source_rows: Mapped[str] = mapped_column(String(40), default="")
+    sort_order: Mapped[int] = mapped_column(Integer, default=100)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class InboundCall(Base):
+    __tablename__ = "inbound_calls"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="connected")
+    phone_encrypted: Mapped[str] = mapped_column(Text, default="")
+    customer_name: Mapped[str] = mapped_column(String(160), default="")
+    intent: Mapped[str] = mapped_column(String(40), default="new_order", index=True)
+    service_type: Mapped[str] = mapped_column(String(24), default="")
+    transcript: Mapped[str] = mapped_column(Text, default="")
+    draft_order: Mapped[str] = mapped_column(Text, default="{}")
+    address: Mapped[str] = mapped_column(Text, default="")
+    payment_method: Mapped[str] = mapped_column(String(80), default="")
+    result: Mapped[str] = mapped_column(String(80), default="draft")
+    transfer_reason: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

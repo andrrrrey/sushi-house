@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.sip import AmiClient, SipError, normalize_server, originate_test_call, render_pjsip_config, write_pjsip_config
+from app.sip import AmiClient, SipError, normalize_server, originate_test_call, render_inbound_dialplan, render_pjsip_config, write_pjsip_config
 
 
 class SipConfigTests(unittest.TestCase):
@@ -31,6 +31,23 @@ class SipConfigTests(unittest.TestCase):
                 "mango_sip_login": "123/225",
                 "mango_sip_password": "password",
             })
+
+    def test_inbound_context_is_enabled_only_for_configured_test_phone(self):
+        settings = {
+            "mango_sip_server": "vpbx123.mangosip.ru",
+            "mango_sip_login": "123/225",
+            "mango_sip_password": "password",
+            "mango_inbound_enabled": "on",
+            "mango_test_phone": "+79270120777",
+        }
+        self.assertIn("context=mango-inbound-test", render_pjsip_config(settings))
+        dialplan = render_inbound_dialplan(settings)
+        self.assertIn('"${CALLER_DIGITS:-10}"="9270120777"', dialplan)
+        self.assertIn("AudioSocket(${AUDIO_UUID},app:9092)", dialplan)
+
+    def test_inbound_enabled_requires_valid_test_phone(self):
+        with self.assertRaises(SipError):
+            render_inbound_dialplan({"mango_inbound_enabled": "on", "mango_test_phone": "225"})
 
     def test_writes_private_configuration_atomically(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -18,10 +18,12 @@ import httpx
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.iiko import IikoOrderSnapshot
-from app.models import IntegrationSetting, TestCall
+from app.iiko import IikoClient, IikoError, IikoOrderSnapshot, RESTAURANT_TIMEZONE
+from app.inbound import knowledge_context, menu_candidates, new_order_state, parse_structured_response, save_inbound_state, validate_order_items
+from app.models import InboundCall, IntegrationSetting, TestCall
 from app.security import decrypt_setting
 from app.settings_catalog import SETTINGS_BY_KEY
+from app.sip import SipError, redirect_active_inbound_to_operator
 
 
 logger = logging.getLogger(__name__)
@@ -142,11 +144,14 @@ class UtteranceDetector:
 
 
 def load_voice_settings() -> dict[str, str]:
-    keys = (*YANDEX_REQUIRED_KEYS, "yandex_voice_emotion", "yandex_voice_speed", "mango_test_phone")
+    keys = (
+        *YANDEX_REQUIRED_KEYS, "yandex_voice_emotion", "yandex_voice_speed", "mango_test_phone",
+        "inbound_order_prompt", "mango_operator_group", "mango_transfer_delay_seconds",
+    )
     with SessionLocal() as db:
         records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(keys))).all()
     values = {record.key: decrypt_setting(record.encrypted_value) for record in records}
-    for key in ("yandex_gpt_model", "yandex_voice", "yandex_voice_emotion", "yandex_voice_speed", "yandex_system_prompt"):
+    for key in ("yandex_gpt_model", "yandex_voice", "yandex_voice_emotion", "yandex_voice_speed", "yandex_system_prompt", "inbound_order_prompt"):
         values.setdefault(key, SETTINGS_BY_KEY[key].default)
     return values
 
@@ -236,6 +241,47 @@ class YandexVoiceClient:
                 "modelUri": model_uri,
                 "completionOptions": {"stream": False, "temperature": 0.1, "maxTokens": "120"},
                 "messages": [{"role": "system", "text": self.system_prompt}, *history[-12:]],
+            },
+        )
+        self._raise(response, "YandexGPT")
+        try:
+            return str(response.json()["result"]["alternatives"][0]["message"]["text"]).strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RealtimeBridgeError("YandexGPT вернул ответ неизвестного формата") from exc
+
+    async def complete_inbound(
+        self,
+        history: list[dict[str, str]],
+        state: dict,
+        candidates: list,
+        kb_context: str,
+    ) -> str:
+        model_uri = self.model if self.model.startswith("gpt://") else f"gpt://{self.folder_id}/{self.model}"
+        menu_lines = [
+            f"- {item.name} | item_id={item.item_id} | цена={item.price if item.price is not None else 'не указана'}"
+            for item in candidates
+        ]
+        contract = (
+            f"{self.system_prompt}\n\n"
+            "Отвечай СТРОГО одним JSON без markdown: "
+            '{"reply":"реплика для клиента","state":{"intent":"new_order|complaint|change_order|refund|faq|operator",'
+            '"customer_name":"","service_type":"delivery|pickup|","items":[{"item_id":"","name":"","quantity":1}],'
+            '"address":"","pickup_point":"","payment_method":"","confirmed":false,'
+            '"operator_required":false,"transfer_reason":""}}. '
+            "Каждый раз возвращай полное актуальное состояние. Позицию можно добавить только если она есть в кандидатах меню ниже; "
+            "сохраняй точные item_id и name. Если подходящей позиции нет или совпадение неоднозначно — уточни, не добавляй. "
+            "Не называй срок доставки, если его нет в базе. Не обещай компенсацию. При подтверждении повтори состав, количество, "
+            "тип получения, адрес/точку и оплату. Ничего не отправляй в iiko.\n\n"
+            f"Текущее состояние: {json.dumps(state, ensure_ascii=False)}\n\n"
+            f"Кандидаты действующего меню iiko:\n{chr(10).join(menu_lines) if menu_lines else '- совпадений пока нет'}\n\n"
+            f"Проверенная база знаний:\n{kb_context}"
+        )
+        response = await self.http.post(
+            self.LLM_URL,
+            json={
+                "modelUri": model_uri,
+                "completionOptions": {"stream": False, "temperature": 0.05, "maxTokens": "900"},
+                "messages": [{"role": "system", "text": contract}, *history[-16:]],
             },
         )
         self._raise(response, "YandexGPT")
@@ -350,9 +396,28 @@ class AudioBridgeManager:
             call_id = str(uuid.UUID(bytes=payload))
             with SessionLocal() as db:
                 record = db.get(TestCall, call_id)
-                allowed = bool(record and record.status == "dialing")
-            if not allowed:
-                raise RealtimeBridgeError("Неизвестный или уже завершённый тестовый звонок")
+                outbound_allowed = bool(record and record.status == "dialing")
+            if not outbound_allowed:
+                runtime = load_voice_settings()
+                with SessionLocal() as db:
+                    setting_records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(("mango_inbound_enabled", "mango_test_phone")))).all()
+                inbound = {item.key: decrypt_setting(item.encrypted_value) for item in setting_records}
+                if inbound.get("mango_inbound_enabled") != "on" or not inbound.get("mango_test_phone"):
+                    raise RealtimeBridgeError("Входящий тестовый контур выключен")
+                with SessionLocal.begin() as db:
+                    db.add(InboundCall(
+                        id=call_id,
+                        status="connected",
+                        phone_encrypted="",
+                        draft_order=json.dumps(new_order_state(), ensure_ascii=False),
+                    ))
+                await self._run_inbound_bridge(call_id, runtime, reader, writer)
+                with SessionLocal.begin() as db:
+                    inbound_record = db.get(InboundCall, call_id)
+                    if inbound_record:
+                        inbound_record.status = "completed"
+                        inbound_record.finished_at = datetime.now(UTC)
+                return
             order = self._orders.pop(call_id, None)
             if not order:
                 raise RealtimeBridgeError("Для тестового звонка не подготовлен заказ iiko")
@@ -368,16 +433,113 @@ class AudioBridgeManager:
         except Exception as exc:
             logger.warning("Yandex voice bridge failed for %s: %s", call_id or "unknown", exc)
             if call_id:
-                update_test_call(
-                    call_id,
-                    status="failed",
-                    error=str(exc)[:1000],
-                    finished_at=datetime.now(UTC),
-                )
+                with SessionLocal.begin() as db:
+                    inbound_record = db.get(InboundCall, call_id)
+                    if inbound_record:
+                        inbound_record.status = "failed"
+                        inbound_record.error = str(exc)[:1000]
+                        inbound_record.finished_at = datetime.now(UTC)
+                    else:
+                        test_record = db.get(TestCall, call_id)
+                        if test_record:
+                            test_record.status = "failed"
+                            test_record.error = str(exc)[:1000]
+                            test_record.finished_at = datetime.now(UTC)
         finally:
             writer.close()
             with suppress(Exception):
                 await writer.wait_closed()
+
+    async def _load_inbound_menu(self):
+        keys = ("iiko_api_login", "iiko_app_id", "iiko_client_secret")
+        with SessionLocal() as db:
+            records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(keys))).all()
+        settings = {item.key: decrypt_setting(item.encrypted_value) for item in records}
+        if len(settings) != len(keys):
+            return []
+        try:
+            async with IikoClient(settings["iiko_api_login"], settings["iiko_app_id"], settings["iiko_client_secret"]) as client:
+                return await client.external_menu_items()
+        except IikoError as exc:
+            logger.warning("Cannot load iiko menu for inbound call: %s", exc)
+            return []
+
+    async def _run_inbound_bridge(
+        self,
+        call_id: str,
+        settings: dict[str, str],
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        missing = [key for key in YANDEX_REQUIRED_KEYS if not settings.get(key)]
+        if missing:
+            raise RealtimeBridgeError("Не заполнены настройки Yandex Cloud")
+        inbound_prompt = settings.get("inbound_order_prompt") or SETTINGS_BY_KEY["inbound_order_prompt"].default
+        settings = dict(settings)
+        settings["yandex_system_prompt"] = inbound_prompt
+        client = YandexVoiceClient(settings)
+        catalog = await self._load_inbound_menu()
+        kb = knowledge_context()
+        state = new_order_state()
+        history: list[dict[str, str]] = []
+        detector = UtteranceDetector()
+        incoming: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=500)
+        reader_task = asyncio.create_task(self._audio_socket_to_queue(reader, incoming))
+        local_time = datetime.now(RESTAURANT_TIMEZONE)
+        day_part = "Доброе утро" if local_time.hour < 12 else ("Добрый день" if local_time.hour < 18 else "Добрый вечер")
+        greeting = f"{day_part}! На связи голосовой помощник Суши Хаус. Представьтесь, пожалуйста, и скажите: оформим доставку или самовывоз?"
+        save_inbound_state(call_id, state, f"Робот: {greeting}")
+        try:
+            await self._play_pcm(writer, await client.synthesize(greeting))
+            if self._discard_incoming(incoming):
+                return
+            async with asyncio.timeout(12 * 60):
+                while True:
+                    payload = await incoming.get()
+                    if payload is None:
+                        return
+                    utterance = detector.feed(payload)
+                    if utterance is None:
+                        continue
+                    recognized = await client.recognize(utterance)
+                    if not recognized:
+                        continue
+                    save_inbound_state(call_id, state, f"Абонент: {recognized}")
+                    history.append({"role": "user", "text": recognized})
+                    raw = await client.complete_inbound(history, state, menu_candidates(recognized, catalog), kb)
+                    answer, state = parse_structured_response(raw, state)
+                    state = validate_order_items(state, catalog)
+                    if not answer:
+                        answer = "Извините, я не расслышала. Повторите, пожалуйста."
+                    history.append({"role": "assistant", "text": answer})
+                    save_inbound_state(call_id, state, f"Робот: {answer}")
+                    detector.reset()
+                    await self._play_pcm(writer, await client.synthesize(answer))
+                    if self._discard_incoming(incoming):
+                        return
+                    if state.get("operator_required"):
+                        operator_group = settings.get("mango_operator_group", "")
+                        if not operator_group:
+                            save_inbound_state(call_id, state, "Система: группа операторов не настроена; перевод не выполнен.")
+                            return
+                        try:
+                            delay = max(0, min(300, int(settings.get("mango_transfer_delay_seconds", "15"))))
+                        except ValueError:
+                            delay = 15
+                        if delay:
+                            await asyncio.sleep(delay)
+                        try:
+                            redirect_active_inbound_to_operator(operator_group)
+                            save_inbound_state(call_id, state, f"Система: звонок переведён на группу {operator_group}.")
+                        except SipError as exc:
+                            save_inbound_state(call_id, state, f"Система: перевод не выполнен: {exc}")
+                        return
+                    detector.reset()
+        finally:
+            reader_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reader_task
+            await client.close()
 
     async def _run_yandex_bridge(
         self,
