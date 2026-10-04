@@ -45,6 +45,8 @@ class SipConfigTests(unittest.TestCase):
         dialplan = render_inbound_dialplan(settings)
         self.assertIn("exten => user9,1,Goto(inbound,1)", dialplan)
         self.assertIn('"${CALLER_DIGITS:-10}"="9270120777"', dialplan)
+        self.assertNotIn("${UUID()}", dialplan)
+        self.assertIn("Set(AUDIO_UUID=${RAND(10000000,99999999)}-", dialplan)
         self.assertIn("AudioSocket(${AUDIO_UUID},app:9092)", dialplan)
 
     def test_inbound_enabled_requires_valid_test_phone(self):
