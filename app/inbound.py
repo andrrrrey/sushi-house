@@ -72,12 +72,37 @@ def new_order_state() -> dict[str, Any]:
         "pickup_point": "",
         "payment_method": "",
         "confirmed": False,
+        "editing_order": False,
         "operator_required": False,
         "transfer_reason": "",
     }
 
 
-ORDER_FIELDS = ("customer_name", "service_type", "items", "address", "pickup_point", "payment_method", "confirmed")
+ORDER_FIELDS = (
+    "customer_name", "service_type", "items", "address", "pickup_point", "payment_method", "confirmed", "editing_order"
+)
+
+
+AMENDMENT_STEMS = (
+    "добав", "дополн", "забыл", "забыли", "включ", "исправ", "измен", "убер", "удал", "замен", "неверн", "неправил",
+)
+
+
+def is_order_amendment_request(text: str) -> bool:
+    normalized = normalize_text(text)
+    words = set(normalized.split())
+    return (
+        "нет" in words
+        or "ошибка" in words
+        or any(stem in normalized for stem in AMENDMENT_STEMS)
+    )
+
+
+def begin_order_amendment(state: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(state)
+    updated["confirmed"] = False
+    updated["editing_order"] = True
+    return updated
 
 
 def order_dialog_step(state: dict[str, Any]) -> str:
@@ -89,6 +114,8 @@ def order_dialog_step(state: dict[str, Any]) -> str:
         return "service_type"
     if not state.get("items"):
         return "items"
+    if state.get("editing_order"):
+        return "items_edit"
     if state["service_type"] == "delivery" and not str(state.get("address") or "").strip():
         return "address"
     if state["service_type"] == "pickup" and not str(state.get("pickup_point") or "").strip():
@@ -109,6 +136,7 @@ def constrain_order_progress(previous: dict[str, Any], proposed: dict[str, Any])
         "name": {"customer_name"},
         "service_type": {"service_type"},
         "items": {"items"},
+        "items_edit": {"items", "editing_order"},
         "address": {"address"},
         "pickup_point": {"pickup_point"},
         "payment": {"payment_method"},
@@ -119,7 +147,7 @@ def constrain_order_progress(previous: dict[str, Any], proposed: dict[str, Any])
     for key in ORDER_FIELDS:
         if key not in allowed:
             result[key] = previous.get(key)
-    if step not in {"confirmation", "complete"}:
+    if step not in {"confirmation", "complete", "items_edit"}:
         result["confirmed"] = False
     return result
 
@@ -136,6 +164,8 @@ def next_order_reply(state: dict[str, Any]) -> str | None:
         return f"{prefix}оформим доставку или самовывоз?"
     if step == "items":
         return "Что хотите заказать?"
+    if step == "items_edit":
+        return "Конечно. Что хотите добавить, убрать или изменить?"
     if step == "address":
         return "Назовите, пожалуйста, адрес доставки."
     if step == "pickup_point":
@@ -155,6 +185,51 @@ def next_order_reply(state: dict[str, Any]) -> str | None:
         )
         return f"{prefix}повторяю заказ: {items}. {fulfillment}. Оплата: {state.get('payment_method')}. Всё верно?"
     return f"{prefix}спасибо, я зафиксировала заказ в тестовом журнале."
+
+
+def apply_fast_order_step(state: dict[str, Any], text: str) -> dict[str, Any] | None:
+    """Handle unambiguous order fields locally to avoid an LLM round trip."""
+    step = order_dialog_step(state)
+    normalized = normalize_text(text)
+    updated = dict(state)
+    if step == "name":
+        value = re.sub(r"^(?:меня\s+зовут|мое\s+имя|это)\s+", "", text.strip(), flags=re.IGNORECASE).strip(" .,!?")
+        rejected = ("заказ", "достав", "самовывоз", "жалоб", "оператор", "оплат")
+        if not value or len(value.split()) > 4 or any(stem in normalize_text(value) for stem in rejected):
+            return None
+        updated["customer_name"] = value.title()
+        return updated
+    if step == "service_type":
+        if "самовывоз" in normalized or "заберу" in normalized or "забрать" in normalized:
+            updated["service_type"] = "pickup"
+            return updated
+        if "достав" in normalized or "привез" in normalized:
+            updated["service_type"] = "delivery"
+            return updated
+        return None
+    if step == "address" and len(normalized) >= 3:
+        updated["address"] = text.strip(" .")
+        return updated
+    if step == "pickup_point" and len(normalized) >= 3:
+        updated["pickup_point"] = text.strip(" .")
+        return updated
+    if step == "payment":
+        if "карт" in normalized or "терминал" in normalized:
+            updated["payment_method"] = "картой"
+            return updated
+        if "налич" in normalized:
+            updated["payment_method"] = "наличными"
+            return updated
+        if "онлайн" in normalized or "ссылк" in normalized:
+            updated["payment_method"] = "онлайн"
+            return updated
+        return None
+    if step == "confirmation" and not is_order_amendment_request(text):
+        words = set(normalized.split())
+        if words & {"да", "верно", "правильно", "подтверждаю"}:
+            updated["confirmed"] = True
+            return updated
+    return None
 
 
 def parse_structured_response(raw: str, previous: dict[str, Any]) -> tuple[str, dict[str, Any]]:

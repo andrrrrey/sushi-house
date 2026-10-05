@@ -10,6 +10,7 @@ import json
 import os
 import re
 import struct
+import time
 import uuid
 from io import BytesIO
 import wave
@@ -19,7 +20,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.iiko import IikoClient, IikoError, IikoOrderSnapshot, RESTAURANT_TIMEZONE
-from app.inbound import constrain_order_progress, knowledge_context, menu_candidates, new_order_state, next_order_reply, order_dialog_step, parse_structured_response, save_inbound_state, validate_order_items
+from app.inbound import apply_fast_order_step, begin_order_amendment, constrain_order_progress, is_order_amendment_request, knowledge_context, menu_candidates, new_order_state, next_order_reply, order_dialog_step, parse_structured_response, save_inbound_state, validate_order_items
 from app.mango import phones_match
 from app.models import InboundCall, IntegrationSetting, TestCall
 from app.security import decrypt_setting, encrypt_setting
@@ -290,24 +291,26 @@ class YandexVoiceClient:
             '{"reply":"реплика для клиента","state":{"intent":"new_order|complaint|change_order|refund|faq|operator",'
             '"customer_name":"","service_type":"delivery|pickup|","items":[{"item_id":"","name":"","quantity":1}],'
             '"address":"","pickup_point":"","payment_method":"","confirmed":false,'
+            '"editing_order":false,'
             '"operator_required":false,"transfer_reason":""}}. '
             "Каждый раз возвращай полное актуальное состояние. Позицию можно добавить только если она есть в кандидатах меню ниже; "
             "сохраняй точные item_id и name. Если подходящей позиции нет или совпадение неоднозначно — уточни, не добавляй. "
             "Веди новый заказ строго пошагово и задавай ровно один короткий вопрос за реплику. Не перечисляй клиенту будущие вопросы "
             "и не проси одновременно назвать имя, тип получения, заказ, адрес и оплату. "
             "Не называй срок доставки, если его нет в базе. Не обещай компенсацию. При подтверждении повтори состав, количество, "
-            "тип получения, адрес/точку и оплату. Ничего не отправляй в iiko.\n\n"
+            "тип получения, адрес/точку и оплату. Если editing_order=true, измени существующий состав: добавь, удали или замени "
+            "названные позиции, сохрани остальные позиции и после изменения верни editing_order=false. Ничего не отправляй в iiko.\n\n"
             f"Текущий шаг диалога: {order_dialog_step(state)}. Обрабатывай прежде всего ответ на этот шаг.\n\n"
             f"Текущее состояние: {json.dumps(state, ensure_ascii=False)}\n\n"
             f"Кандидаты действующего меню iiko:\n{chr(10).join(menu_lines) if menu_lines else '- совпадений пока нет'}\n\n"
-            f"Проверенная база знаний:\n{kb_context}"
+            f"Проверенная база знаний:\n{kb_context[:8000]}"
         )
         response = await self.http.post(
             self.LLM_URL,
             json={
                 "modelUri": model_uri,
-                "completionOptions": {"stream": False, "temperature": 0.05, "maxTokens": "900"},
-                "messages": [{"role": "system", "text": contract}, *history[-16:]],
+                "completionOptions": {"stream": False, "temperature": 0.05, "maxTokens": "500"},
+                "messages": [{"role": "system", "text": contract}, *history[-10:]],
             },
         )
         self._raise(response, "YandexGPT")
@@ -511,11 +514,12 @@ class AudioBridgeManager:
         client = YandexVoiceClient(settings)
         catalog = await self._load_inbound_menu()
         kb = knowledge_context()
-        state = dict(initial_state or new_order_state())
+        state = new_order_state()
+        state.update(initial_state or {})
         history: list[dict[str, str]] = []
         detector = UtteranceDetector(
             threshold=260,
-            silence_frames=75,
+            silence_frames=60,
             minimum_frames=15,
             maximum_frames=1500,
             pre_roll_frames=15,
@@ -544,25 +548,55 @@ class AudioBridgeManager:
                     utterance = detector.feed(payload)
                     if utterance is None:
                         continue
+                    turn_started = time.monotonic()
                     recognized = await client.recognize(utterance)
+                    stt_elapsed = time.monotonic() - turn_started
                     if not recognized:
                         continue
                     save_inbound_state(call_id, state, f"Абонент: {recognized}")
                     history.append({"role": "user", "text": recognized})
-                    previous_state = state
-                    raw = await client.complete_inbound(history, state, menu_candidates(recognized, catalog), kb)
-                    answer, state = parse_structured_response(raw, state)
-                    state = constrain_order_progress(previous_state, state)
-                    state = validate_order_items(state, catalog)
-                    staged_answer = next_order_reply(state)
-                    if staged_answer is not None:
-                        answer = staged_answer
+                    previous_state = dict(state)
+                    step = order_dialog_step(state)
+                    candidates = menu_candidates(recognized, catalog)
+                    amendment = step in {"confirmation", "items_edit", "complete"} and is_order_amendment_request(recognized)
+                    if amendment:
+                        state = begin_order_amendment(state)
+
+                    fast_state = None if amendment else apply_fast_order_step(state, recognized)
+                    llm_elapsed = 0.0
+                    if fast_state is not None:
+                        state = fast_state
+                        answer = next_order_reply(state) or "Спасибо."
+                    elif state.get("editing_order") and not candidates:
+                        answer = next_order_reply(state) or "Что хотите изменить?"
+                    else:
+                        llm_started = time.monotonic()
+                        raw = await client.complete_inbound(history, state, candidates, kb)
+                        llm_elapsed = time.monotonic() - llm_started
+                        answer, proposed = parse_structured_response(raw, state)
+                        state = constrain_order_progress(state, proposed)
+                        state = validate_order_items(state, catalog)
+                        items_changed = state.get("items") != previous_state.get("items")
+                        if items_changed and (amendment or previous_state.get("editing_order")):
+                            state["editing_order"] = False
+                        elif amendment or previous_state.get("editing_order"):
+                            state["editing_order"] = True
+                        staged_answer = next_order_reply(state)
+                        if staged_answer is not None and (items_changed or order_dialog_step(state) != "items_edit"):
+                            answer = staged_answer
                     if not answer:
                         answer = "Извините, я не расслышала. Повторите, пожалуйста."
                     history.append({"role": "assistant", "text": answer})
                     save_inbound_state(call_id, state, f"Робот: {answer}")
                     detector.reset()
-                    await self._play_pcm(writer, await client.synthesize(answer))
+                    tts_started = time.monotonic()
+                    audio = await client.synthesize(answer)
+                    tts_elapsed = time.monotonic() - tts_started
+                    logger.info(
+                        "Inbound turn %s timings: stt=%.2fs llm=%.2fs tts=%.2fs processing=%.2fs step=%s",
+                        call_id, stt_elapsed, llm_elapsed, tts_elapsed, time.monotonic() - turn_started, step,
+                    )
+                    await self._play_pcm(writer, audio)
                     if self._discard_incoming(incoming):
                         return
                     if state.get("operator_required"):

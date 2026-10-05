@@ -1,5 +1,5 @@
 from app.iiko import IikoMenuItem
-from app.inbound import constrain_order_progress, menu_candidates, new_order_state, next_order_reply, order_dialog_step, parse_structured_response, validate_order_items
+from app.inbound import apply_fast_order_step, begin_order_amendment, constrain_order_progress, is_order_amendment_request, menu_candidates, new_order_state, next_order_reply, order_dialog_step, parse_structured_response, validate_order_items
 
 
 def test_menu_candidates_prefers_real_iiko_name():
@@ -79,3 +79,32 @@ def test_model_cannot_skip_future_order_steps():
     assert constrained["service_type"] == ""
     assert constrained["address"] == ""
     assert constrained["payment_method"] == ""
+
+
+def test_order_can_return_from_confirmation_to_item_editing():
+    state = new_order_state()
+    state.update({
+        "customer_name": "Жаргал", "service_type": "delivery",
+        "items": [{"item_id": "1", "name": "Филадельфия", "quantity": 1}],
+        "address": "142 микрорайон, дом 3", "payment_method": "картой",
+    })
+    assert order_dialog_step(state) == "confirmation"
+    assert is_order_amendment_request("Я хочу ещё дополнить заказ")
+    state = begin_order_amendment(state)
+    assert order_dialog_step(state) == "items_edit"
+    assert next_order_reply(state) == "Конечно. Что хотите добавить, убрать или изменить?"
+
+
+def test_fast_order_fields_avoid_llm_round_trip():
+    state = new_order_state()
+    state = apply_fast_order_step(state, "Меня зовут Жаргал")
+    assert state and state["customer_name"] == "Жаргал"
+    state = apply_fast_order_step(state, "Мне доставку")
+    assert state and state["service_type"] == "delivery"
+    state["items"] = [{"item_id": "1", "name": "Филадельфия", "quantity": 1}]
+    state = apply_fast_order_step(state, "142 микрорайон дом 3 квартира 4")
+    assert state and state["address"] == "142 микрорайон дом 3 квартира 4"
+    state = apply_fast_order_step(state, "Картой")
+    assert state and state["payment_method"] == "картой"
+    state = apply_fast_order_step(state, "Да, всё верно")
+    assert state and state["confirmed"] is True
