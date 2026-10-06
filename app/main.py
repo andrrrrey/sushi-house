@@ -68,7 +68,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.12.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.13.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -908,6 +908,24 @@ async def update_setting(
             error = quote_plus("Задержка перевода должна быть от 0 до 300 секунд")
             return RedirectResponse(f"/settings?error={error}", status_code=303)
         value = str(delay)
+    if setting_key == "inbound_delivery_eta_minutes":
+        try:
+            eta = int(value)
+        except ValueError:
+            eta = 0
+        if not 1 <= eta <= 300:
+            error = quote_plus("Время доставки должно быть от 1 до 300 минут")
+            return RedirectResponse(f"/settings?error={error}", status_code=303)
+        value = str(eta)
+    if setting_key == "inbound_test_bonus_balance":
+        try:
+            balance = float(value.replace(",", "."))
+        except ValueError:
+            balance = -1
+        if not 0 <= balance <= 1_000_000:
+            error = quote_plus("Тестовый баланс должен быть от 0 до 1000000")
+            return RedirectResponse(f"/settings?error={error}", status_code=303)
+        value = str(int(balance)) if balance.is_integer() else str(round(balance, 2))
     if setting_key == "yandex_voice_emotion":
         selected_voice = load_settings("yandex_voice").get("yandex_voice", SETTINGS_BY_KEY["yandex_voice"].default)
         if not role_supported(selected_voice, value):

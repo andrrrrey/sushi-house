@@ -20,6 +20,9 @@ def test_voice_robot_settings_are_available():
         "mango_inbound_enabled",
         "mango_transfer_delay_seconds",
         "inbound_order_prompt",
+        "inbound_free_condiments_text",
+        "inbound_delivery_eta_minutes",
+        "inbound_test_bonus_balance",
     }
 
     assert expected.issubset(SETTINGS_BY_KEY)

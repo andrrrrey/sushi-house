@@ -50,6 +50,23 @@ class SpokenOrderTests(unittest.TestCase):
 
 
 class IikoClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_customer_bonus_balance_uses_bonus_wallets(self):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v2/access_token":
+                return httpx.Response(200, json={"token": "test-token"})
+            if request.url.path == "/api/1/organizations":
+                return httpx.Response(200, json={"organizations": [{"id": "org-1"}]})
+            self.assertEqual(request.url.path, "/api/1/loyalty/iiko/customer/info")
+            return httpx.Response(200, json={"customer": {"walletBalances": [
+                {"name": "Бонусный счёт", "type": "Bonus", "balance": 350.5},
+                {"name": "Депозит", "type": "Deposit", "balance": 1000},
+            ]}})
+
+        async with IikoClient("login", "app", "secret", transport=httpx.MockTransport(handler)) as client:
+            balance = await client.customer_bonus_balance("+79270000000")
+
+        self.assertEqual(balance, 350.5)
+
     async def test_latest_accepted_starter_order_contains_items_and_address(self):
         async def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/api/v2/access_token":

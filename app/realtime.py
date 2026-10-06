@@ -149,6 +149,7 @@ def load_voice_settings() -> dict[str, str]:
     keys = (
         *YANDEX_REQUIRED_KEYS, "yandex_voice_emotion", "yandex_voice_speed", "mango_test_phone",
         "inbound_order_prompt", "mango_operator_group", "mango_transfer_delay_seconds",
+        "inbound_delivery_eta_minutes", "inbound_free_condiments_text", "inbound_test_bonus_balance",
     )
     with SessionLocal() as db:
         records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(keys))).all()
@@ -289,8 +290,12 @@ class YandexVoiceClient:
             f"{self.system_prompt}\n\n"
             "Отвечай СТРОГО одним JSON без markdown: "
             '{"reply":"реплика для клиента","state":{"intent":"new_order|complaint|change_order|refund|faq|operator",'
-            '"customer_name":"","service_type":"delivery|pickup|","items":[{"item_id":"","name":"","quantity":1}],'
-            '"address":"","pickup_point":"","payment_method":"","confirmed":false,'
+            '"customer_name":"","service_type":"delivery|pickup|","caller_phone":"","contact_phone":"",'
+            '"phone_status":"confirmed|different|","items":[{"item_id":"","name":"","quantity":1}],'
+            '"address":"","address_locality":"","address_street_house":"","residence_type":"private|apartment|",'
+            '"entrance":"","apartment":"","floor":"","doorphone":"","address_confirmed":false,"pickup_point":"",'
+            '"chopsticks_count":-1,"condiments_extra_status":"none|requested|added|","free_condiments_text":"",'
+            '"payment_method":"","total_amount":0.0,"total_complete":false,"delivery_eta_minutes":0,"bonus_balance":"","confirmed":false,'
             '"editing_order":false,'
             '"operator_required":false,"transfer_reason":""}}. '
             "Каждый раз возвращай полное актуальное состояние. Позицию можно добавить только если она есть в кандидатах меню ниже; "
@@ -299,7 +304,8 @@ class YandexVoiceClient:
             "и не проси одновременно назвать имя, тип получения, заказ, адрес и оплату. "
             "Не называй срок доставки, если его нет в базе. Не обещай компенсацию. При подтверждении повтори состав, количество, "
             "тип получения, адрес/точку и оплату. Если editing_order=true, измени существующий состав: добавь, удали или замени "
-            "названные позиции, сохрани остальные позиции и после изменения верни editing_order=false. Ничего не отправляй в iiko.\n\n"
+            "названные позиции, сохрани остальные позиции и после изменения верни editing_order=false. На шагах condiments и condiments_paid "
+            "добавь названные платные добавки из кандидатов меню и установи condiments_extra_status=added. Ничего не отправляй в iiko.\n\n"
             f"Текущий шаг диалога: {order_dialog_step(state)}. Обрабатывай прежде всего ответ на этот шаг.\n\n"
             f"Текущее состояние: {json.dumps(state, ensure_ascii=False)}\n\n"
             f"Кандидаты действующего меню iiko:\n{chr(10).join(menu_lines) if menu_lines else '- совпадений пока нет'}\n\n"
@@ -309,7 +315,7 @@ class YandexVoiceClient:
             self.LLM_URL,
             json={
                 "modelUri": model_uri,
-                "completionOptions": {"stream": False, "temperature": 0.05, "maxTokens": "500"},
+                "completionOptions": {"stream": False, "temperature": 0.05, "maxTokens": "750"},
                 "messages": [{"role": "system", "text": contract}, *history[-10:]],
             },
         )
@@ -436,6 +442,7 @@ class AudioBridgeManager:
                 caller_phone = inbound["mango_test_phone"]
                 initial_state = new_order_state()
                 initial_state["customer_name"] = known_inbound_customer(caller_phone)
+                initial_state["caller_phone"] = caller_phone
                 with SessionLocal.begin() as db:
                     db.add(InboundCall(
                         id=call_id,
@@ -497,6 +504,22 @@ class AudioBridgeManager:
             logger.warning("Cannot load iiko menu for inbound call: %s", exc)
             return []
 
+    async def _load_inbound_bonus(self, phone: str) -> float | None:
+        if not phone:
+            return None
+        keys = ("iiko_api_login", "iiko_app_id", "iiko_client_secret")
+        with SessionLocal() as db:
+            records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(keys))).all()
+        settings = {item.key: decrypt_setting(item.encrypted_value) for item in records}
+        if len(settings) != len(keys):
+            return None
+        try:
+            async with IikoClient(settings["iiko_api_login"], settings["iiko_app_id"], settings["iiko_client_secret"]) as client:
+                return await client.customer_bonus_balance(phone)
+        except IikoError as exc:
+            logger.warning("Cannot load iikoCard balance for inbound call: %s", exc)
+            return None
+
     async def _run_inbound_bridge(
         self,
         call_id: str,
@@ -512,10 +535,19 @@ class AudioBridgeManager:
         settings = dict(settings)
         settings["yandex_system_prompt"] = inbound_prompt
         client = YandexVoiceClient(settings)
+        caller_phone = str((initial_state or {}).get("caller_phone") or settings.get("mango_test_phone") or "")
+        bonus_task = asyncio.create_task(self._load_inbound_bonus(caller_phone))
         catalog = await self._load_inbound_menu()
         kb = knowledge_context()
         state = new_order_state()
         state.update(initial_state or {})
+        state["free_condiments_text"] = settings.get("inbound_free_condiments_text") or "по стандартной норме"
+        configured_bonus = settings.get("inbound_test_bonus_balance") or ""
+        state["bonus_balance"] = configured_bonus
+        try:
+            state["delivery_eta_minutes"] = max(0, int(settings.get("inbound_delivery_eta_minutes") or 0))
+        except ValueError:
+            state["delivery_eta_minutes"] = 0
         history: list[dict[str, str]] = []
         detector = UtteranceDetector(
             threshold=260,
@@ -564,6 +596,7 @@ class AudioBridgeManager:
 
                     fast_state = None if amendment else apply_fast_order_step(state, recognized)
                     llm_elapsed = 0.0
+                    items_changed = False
                     if fast_state is not None:
                         state = fast_state
                         answer = next_order_reply(state) or "Спасибо."
@@ -577,13 +610,27 @@ class AudioBridgeManager:
                         state = constrain_order_progress(state, proposed)
                         state = validate_order_items(state, catalog)
                         items_changed = state.get("items") != previous_state.get("items")
+                        if step in {"condiments", "condiments_paid"} and items_changed:
+                            state["condiments_extra_status"] = "added"
                         if items_changed and (amendment or previous_state.get("editing_order")):
                             state["editing_order"] = False
                         elif amendment or previous_state.get("editing_order"):
                             state["editing_order"] = True
-                        staged_answer = next_order_reply(state)
-                        if staged_answer is not None and (items_changed or order_dialog_step(state) != "items_edit"):
-                            answer = staged_answer
+                    if order_dialog_step(state) == "confirmation" and bonus_task:
+                        try:
+                            live_bonus = await asyncio.wait_for(asyncio.shield(bonus_task), timeout=0.5)
+                            if live_bonus is not None:
+                                state["bonus_balance"] = str(live_bonus)
+                            bonus_task = None
+                        except TimeoutError:
+                            pass
+                        except Exception as exc:
+                            logger.warning("Cannot finish iikoCard balance lookup for %s: %s", call_id, exc)
+                            bonus_task = None
+                    staged_answer = next_order_reply(state)
+                    current_step = order_dialog_step(state)
+                    if staged_answer is not None and (items_changed or current_step not in {"items", "items_edit", "condiments_paid"}):
+                        answer = staged_answer
                     if not answer:
                         answer = "Извините, я не расслышала. Повторите, пожалуйста."
                     history.append({"role": "assistant", "text": answer})
@@ -618,6 +665,10 @@ class AudioBridgeManager:
                         return
                     detector.reset()
         finally:
+            if bonus_task:
+                bonus_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await bonus_task
             reader_task.cancel()
             with suppress(asyncio.CancelledError):
                 await reader_task

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+import asyncio
 import re
 from typing import Any
 
@@ -229,6 +230,39 @@ class IikoClient:
         self.token = data.get("token")
         if not self.token:
             raise IikoError("Авторизация выполнена, но токен в ответе отсутствует")
+
+    async def customer_bonus_balance(self, phone: str) -> float | None:
+        """Return the first customer's bonus-wallet total found across available organizations."""
+        organizations = (await self.post("/api/1/organizations", {})).get("organizations", [])
+        organization_ids = [item.get("id") for item in organizations if item.get("id")]
+        results = await asyncio.gather(*(
+            self.post(
+                "/api/1/loyalty/iiko/customer/info",
+                {"organizationId": organization_id, "type": "phone", "phone": phone},
+            )
+            for organization_id in organization_ids
+        ), return_exceptions=True)
+        for data in results:
+            if isinstance(data, Exception):
+                continue
+            customer = data.get("customer") or {}
+            if not customer:
+                continue
+            wallets = customer.get("walletBalances") or []
+            bonus_wallets = [
+                wallet for wallet in wallets
+                if "бонус" in str(wallet.get("name") or "").casefold()
+                or str(wallet.get("type") or "").casefold() == "bonus"
+            ]
+            selected = bonus_wallets or wallets
+            balances = []
+            for wallet in selected:
+                try:
+                    balances.append(float(wallet.get("balance") or 0))
+                except (TypeError, ValueError):
+                    continue
+            return round(sum(balances), 2) if balances else 0.0
+        return None
 
     async def latest_accepted_starter_order(self, lookback_days: int = 2) -> IikoOrderSnapshot | None:
         organizations = (await self.post("/api/1/organizations", {})).get("organizations", [])
