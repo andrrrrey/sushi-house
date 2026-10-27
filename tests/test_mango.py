@@ -5,7 +5,7 @@ from urllib.parse import parse_qs
 
 import httpx
 
-from app.mango import MangoClient, MangoEventError, describe_route_result, parse_call_event, parse_route_result, phones_match, should_route_test_call, verify_signature
+from app.mango import MangoClient, MangoEventError, describe_route_result, parse_call_event, parse_route_result, phones_match, should_route_inbound_call, should_route_test_call, verify_signature
 
 
 class MangoEventTests(unittest.TestCase):
@@ -76,6 +76,16 @@ class MangoEventTests(unittest.TestCase):
         }))
         self.assertFalse(should_route_test_call(
             event, enabled=True, test_phone="+79270120777", target_extension="225", target_sip_login="user9",
+        ))
+
+    def test_supervised_mode_routes_any_real_caller(self):
+        event = parse_call_event(json.dumps({
+            "call_id": "call-real", "seq": 1, "call_state": "Appeared", "location": "queue",
+            "from": {"number": "79000000000"}, "to": {"number": "374747"},
+        }))
+        self.assertTrue(should_route_inbound_call(
+            event, enabled=True, mode="supervised", test_phone="+79270120777",
+            target_extension="225", target_sip_login="user9",
         ))
 
     def test_parses_route_result(self):

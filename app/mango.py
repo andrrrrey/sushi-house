@@ -131,6 +131,32 @@ def should_route_test_call(
     return location == "queue" or location == "abonent" or location.startswith("ivr")
 
 
+def should_route_inbound_call(
+    event: ParsedCallEvent,
+    *,
+    enabled: bool,
+    mode: str,
+    test_phone: str,
+    target_extension: str,
+    target_sip_login: str = "",
+) -> bool:
+    if not enabled:
+        return False
+    if mode not in {"test", "supervised"}:
+        return False
+    if mode == "test" and not phones_match(event.from_number, test_phone):
+        return False
+    if event.call_state.casefold() != "appeared" or event.taken_from_call_id:
+        return False
+    if event.to_extension.strip() == target_extension.strip():
+        return False
+    sip_user = target_sip_login.strip().removeprefix("sip:").split("@", 1)[0]
+    if sip_user and event.to_number.casefold().startswith(f"sip:{sip_user.casefold()}@"):
+        return False
+    location = event.location.casefold()
+    return location == "queue" or location == "abonent" or location.startswith("ivr")
+
+
 class MangoClient:
     def __init__(
         self,

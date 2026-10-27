@@ -25,7 +25,7 @@ from app.mango import (
     describe_route_result,
     parse_call_event,
     parse_route_result,
-    should_route_test_call,
+    should_route_inbound_call,
     verify_signature,
 )
 from app.knowledge_seed import seed_knowledge_base
@@ -53,7 +53,7 @@ async def lifespan(_: FastAPI):
     try:
         sip_settings = load_settings(
             *SIP_REQUIRED_KEYS, "mango_sip_port", "mango_extension",
-            "mango_inbound_enabled", "mango_test_phone", "mango_operator_group",
+            "mango_inbound_enabled", "inbound_operation_mode", "mango_test_phone", "mango_operator_group",
         )
         if all(sip_settings.get(key) for key in SIP_REQUIRED_KEYS):
             status = apply_registration(sip_settings)
@@ -68,7 +68,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.13.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.14.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -371,7 +371,7 @@ async def mango_sip_apply(request: Request, csrf_token: str = Form(...)):
         return user
     settings = load_settings(
         *SIP_REQUIRED_KEYS, "mango_sip_port", "mango_extension",
-        "mango_inbound_enabled", "mango_test_phone", "mango_operator_group",
+        "mango_inbound_enabled", "inbound_operation_mode", "mango_test_phone", "mango_operator_group",
     )
     try:
         status = apply_registration(settings)
@@ -493,17 +493,46 @@ async def inbound_page(request: Request):
             "draft": draft,
             "error": record.error,
         })
-    inbound_settings = load_settings("mango_inbound_enabled", "mango_test_phone", "mango_transfer_delay_seconds")
+    inbound_settings = load_settings("mango_inbound_enabled", "inbound_operation_mode", "mango_test_phone", "mango_transfer_delay_seconds")
     return templates.TemplateResponse(
         request=request,
         name="inbound.html",
         context=page_context(
             request, user=user, active="inbound", calls=calls,
             enabled=inbound_settings.get("mango_inbound_enabled", "off") == "on",
+            operation_mode=inbound_settings.get("inbound_operation_mode", "test"),
             test_phone=mask_phone(inbound_settings.get("mango_test_phone", "")) if inbound_settings.get("mango_test_phone") else "—",
             transfer_delay=inbound_settings.get("mango_transfer_delay_seconds", SETTINGS_BY_KEY["mango_transfer_delay_seconds"].default),
         ),
     )
+
+
+@app.post("/inbound/{call_id}/review")
+async def review_inbound_call(
+    request: Request,
+    call_id: str,
+    decision: str = Form(...),
+    csrf_token: str = Form(...),
+):
+    verify_csrf(request, csrf_token)
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="Некорректное решение оператора")
+    with SessionLocal.begin() as db:
+        record = db.get(InboundCall, call_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Звонок не найден")
+        if decision == "approve" and record.result not in {"confirmed_draft", "operator_approved"}:
+            raise HTTPException(status_code=409, detail="Можно одобрить только подтверждённый клиентом черновик")
+        record.result = "operator_approved" if decision == "approve" else "operator_rejected"
+        db.add(AuditEvent(
+            event_type=f"inbound_{record.result}",
+            actor=user.username,
+            details=f"{call_id}; iiko_write=false",
+        ))
+    return RedirectResponse(f"/inbound?reviewed={call_id}", status_code=303)
 
 
 @app.post("/calls/test/start")
@@ -591,7 +620,7 @@ async def mango_call_endpoint_status():
 async def mango_call_event(request: Request):
     settings = load_settings(
         "mango_vpbx_api_key", "mango_vpbx_api_salt", "mango_inbound_enabled",
-        "mango_test_phone", "mango_extension", "mango_sip_login",
+        "inbound_operation_mode", "mango_test_phone", "mango_extension", "mango_sip_login",
     )
     if not settings.get("mango_vpbx_api_key") or not settings.get("mango_vpbx_api_salt"):
         return JSONResponse({"status": "not_configured"}, status_code=503)
@@ -634,9 +663,10 @@ async def mango_call_event(request: Request):
                     disconnect_reason=event.disconnect_reason,
                     event_timestamp=event.event_timestamp,
                 ))
-            if should_route_test_call(
+            if should_route_inbound_call(
                 event,
                 enabled=settings.get("mango_inbound_enabled") == "on",
+                mode=settings.get("inbound_operation_mode", "test"),
                 test_phone=settings.get("mango_test_phone", ""),
                 target_extension=route_target,
                 target_sip_login=settings.get("mango_sip_login", ""),
@@ -951,10 +981,10 @@ async def update_setting(
                 else:
                     db.add(IntegrationSetting(key="yandex_voice_emotion", encrypted_value=fallback))
         db.add(AuditEvent(event_type="setting_updated", actor=user.username, details=setting_key))
-    if setting_key in {"mango_test_phone", "mango_inbound_enabled"}:
+    if setting_key in {"mango_test_phone", "mango_inbound_enabled", "inbound_operation_mode"}:
         sip_settings = load_settings(
             *SIP_REQUIRED_KEYS, "mango_sip_port", "mango_extension",
-            "mango_inbound_enabled", "mango_test_phone", "mango_operator_group",
+            "mango_inbound_enabled", "inbound_operation_mode", "mango_test_phone", "mango_operator_group",
         )
         if all(sip_settings.get(key) for key in SIP_REQUIRED_KEYS):
             try:

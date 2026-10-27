@@ -25,7 +25,7 @@ from app.mango import phones_match
 from app.models import InboundCall, IntegrationSetting, TestCall
 from app.security import decrypt_setting, encrypt_setting
 from app.settings_catalog import SETTINGS_BY_KEY
-from app.sip import SipError, redirect_active_inbound_to_operator
+from app.sip import SipError, active_audiosocket_caller, redirect_active_inbound_to_operator
 
 
 logger = logging.getLogger(__name__)
@@ -150,6 +150,7 @@ def load_voice_settings() -> dict[str, str]:
         *YANDEX_REQUIRED_KEYS, "yandex_voice_emotion", "yandex_voice_speed", "mango_test_phone",
         "inbound_order_prompt", "mango_operator_group", "mango_transfer_delay_seconds",
         "inbound_delivery_eta_minutes", "inbound_free_condiments_text", "inbound_test_bonus_balance",
+        "inbound_operation_mode",
     )
     with SessionLocal() as db:
         records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(keys))).all()
@@ -295,8 +296,9 @@ class YandexVoiceClient:
             '"address":"","address_locality":"","address_street_house":"","residence_type":"private|apartment|",'
             '"entrance":"","apartment":"","floor":"","doorphone":"","address_confirmed":false,"pickup_point":"",'
             '"chopsticks_count":-1,"condiments_extra_status":"none|requested|added|","free_condiments_text":"",'
-            '"payment_method":"","total_amount":0.0,"total_complete":false,"delivery_eta_minutes":0,"bonus_balance":"","confirmed":false,'
-            '"editing_order":false,'
+            '"payment_method":"","payment_type_ids":[],"payment_review_required":false,"blogger_name":"",'
+            '"total_amount":0.0,"total_complete":false,"delivery_eta_minutes":0,"bonus_balance":"","confirmed":false,'
+            '"editing_order":false,"contains_roll99":false,'
             '"operator_required":false,"transfer_reason":""}}. '
             "Каждый раз возвращай полное актуальное состояние. Позицию можно добавить только если она есть в кандидатах меню ниже; "
             "сохраняй точные item_id и name. Если подходящей позиции нет или совпадение неоднозначно — уточни, не добавляй. "
@@ -435,11 +437,22 @@ class AudioBridgeManager:
             if not outbound_allowed:
                 runtime = load_voice_settings()
                 with SessionLocal() as db:
-                    setting_records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(("mango_inbound_enabled", "mango_test_phone")))).all()
+                    setting_records = db.scalars(select(IntegrationSetting).where(IntegrationSetting.key.in_(("mango_inbound_enabled", "mango_test_phone", "inbound_operation_mode")))).all()
                 inbound = {item.key: decrypt_setting(item.encrypted_value) for item in setting_records}
-                if inbound.get("mango_inbound_enabled") != "on" or not inbound.get("mango_test_phone"):
+                mode = inbound.get("inbound_operation_mode", "test")
+                if inbound.get("mango_inbound_enabled") != "on":
                     raise RealtimeBridgeError("Входящий тестовый контур выключен")
-                caller_phone = inbound["mango_test_phone"]
+                if mode == "test":
+                    caller_phone = inbound.get("mango_test_phone", "")
+                    if not caller_phone:
+                        raise RealtimeBridgeError("Для тестового режима не задан тестовый номер")
+                elif mode == "supervised":
+                    try:
+                        caller_phone = active_audiosocket_caller(call_id)
+                    except SipError as exc:
+                        raise RealtimeBridgeError(str(exc)) from exc
+                else:
+                    raise RealtimeBridgeError("Неизвестный режим входящих звонков")
                 initial_state = new_order_state()
                 initial_state["customer_name"] = known_inbound_customer(caller_phone)
                 initial_state["caller_phone"] = caller_phone

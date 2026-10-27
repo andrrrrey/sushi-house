@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.iiko import IikoMenuItem
+from app.iiko_rules import ROLL_99_PRODUCT_IDS, payment_plan
 from app.models import InboundCall, KnowledgeEntry
 
 
@@ -85,12 +86,16 @@ def new_order_state() -> dict[str, Any]:
         "condiments_extra_status": "",
         "free_condiments_text": "по стандартной норме",
         "payment_method": "",
+        "payment_type_ids": [],
+        "payment_review_required": False,
+        "blogger_name": "",
         "total_amount": 0.0,
         "total_complete": False,
         "delivery_eta_minutes": 0,
         "bonus_balance": "",
         "confirmed": False,
         "editing_order": False,
+        "contains_roll99": False,
         "operator_required": False,
         "transfer_reason": "",
     }
@@ -100,7 +105,8 @@ ORDER_FIELDS = (
     "customer_name", "service_type", "caller_phone", "contact_phone", "phone_status", "items", "address",
     "address_locality", "address_street_house", "residence_type", "entrance", "apartment", "floor", "doorphone",
     "address_confirmed", "pickup_point", "chopsticks_count", "condiments_extra_status", "free_condiments_text",
-    "payment_method", "total_amount", "total_complete", "delivery_eta_minutes", "bonus_balance", "confirmed", "editing_order"
+    "payment_method", "payment_type_ids", "payment_review_required", "blogger_name", "total_amount", "total_complete",
+    "delivery_eta_minutes", "bonus_balance", "confirmed", "editing_order", "contains_roll99"
 )
 
 
@@ -170,6 +176,8 @@ def order_dialog_step(state: dict[str, Any]) -> str:
         return "pickup_point"
     if not str(state.get("payment_method") or "").strip():
         return "payment"
+    if state.get("payment_type_ids") == [payment_plan("бартер")[0][0]] and not str(state.get("blogger_name") or "").strip():
+        return "blogger_name"
     if not state.get("confirmed"):
         return "confirmation"
     return "complete"
@@ -199,7 +207,8 @@ def constrain_order_progress(previous: dict[str, Any], proposed: dict[str, Any])
         "doorphone": {"doorphone", "address"},
         "address_confirmation": {"address_confirmed", "address_locality", "address_street_house", "residence_type", "entrance", "apartment", "floor", "doorphone", "address"},
         "pickup_point": {"pickup_point"},
-        "payment": {"payment_method"},
+        "payment": {"payment_method", "payment_type_ids", "payment_review_required"},
+        "blogger_name": {"blogger_name", "payment_review_required"},
         "confirmation": set(ORDER_FIELDS),
         "complete": set(ORDER_FIELDS),
     }.get(step, set())
@@ -257,6 +266,8 @@ def next_order_reply(state: dict[str, Any]) -> str | None:
         return "Из какой точки Суши Хаус вам будет удобно забрать заказ?"
     if step == "payment":
         return "Как вам будет удобно оплатить заказ?"
+    if step == "blogger_name":
+        return "Назовите, пожалуйста, фамилию, имя и отчество блогера для проверки оператором."
     if step == "confirmation":
         items = ", ".join(
             f"{int(item.get('quantity') or 1)} — {item.get('name')}"
@@ -278,7 +289,9 @@ def next_order_reply(state: dict[str, Any]) -> str | None:
         bonus = f" На бонусном счёте: {format_money(state.get('bonus_balance'))}." if str(state.get("bonus_balance") or "").strip() else ""
         return (
             f"{prefix}повторяю заказ: {items}. Комплектов палочек: {sticks}. {fulfillment}. "
-            f"Телефон: {phone}. Оплата: {state.get('payment_method')}.{total}{eta}{bonus} Всё верно?"
+            f"Телефон: {phone}. Оплата: {state.get('payment_method')}."
+            f"{' Блогер: ' + str(state.get('blogger_name')) + '.' if state.get('blogger_name') else ''}"
+            f"{total}{eta}{bonus} Всё верно?"
         )
     return f"{prefix}спасибо, я зафиксировала заказ в тестовом журнале."
 
@@ -409,16 +422,37 @@ def apply_fast_order_step(state: dict[str, Any], text: str) -> dict[str, Any] | 
         updated["pickup_point"] = text.strip(" .")
         return updated
     if step == "payment":
-        if "карт" in normalized or "терминал" in normalized:
-            updated["payment_method"] = "картой"
-            return updated
-        if "налич" in normalized:
-            updated["payment_method"] = "наличными"
-            return updated
-        if "онлайн" in normalized or "ссылк" in normalized:
-            updated["payment_method"] = "онлайн"
+        recognized = any(value in normalized for value in ("карт", "терминал", "налич", "онлайн", "ссылк", "бонус", "балл", "блог", "бартер"))
+        if recognized:
+            has_cash = "налич" in normalized
+            has_card = "карт" in normalized or "терминал" in normalized
+            has_bonus = "бонус" in normalized or "балл" in normalized
+            if "блог" in normalized or "бартер" in normalized:
+                label = "БЛОГЕРЫ"
+            elif has_cash and has_card:
+                label = "картой и наличными"
+            elif has_bonus and has_cash:
+                label = "бонусами и наличными"
+            elif has_bonus and has_card:
+                label = "бонусами и картой"
+            elif has_bonus:
+                label = "бонусными баллами"
+            elif has_cash:
+                label = "наличными 2"
+            elif has_card:
+                label = "картой"
+            else:
+                label = "онлайн"
+            updated["payment_method"] = label
+            ids, review_required = payment_plan(text)
+            updated["payment_type_ids"] = ids
+            updated["payment_review_required"] = review_required
             return updated
         return None
+    if step == "blogger_name" and len(normalized.split()) >= 2:
+        updated["blogger_name"] = text.strip(" .").title()
+        updated["payment_review_required"] = True
+        return updated
     if step == "confirmation" and not is_order_amendment_request(text):
         words = set(normalized.split())
         if words & {"да", "верно", "правильно", "подтверждаю"}:
@@ -468,12 +502,22 @@ def validate_order_items(state: dict[str, Any], catalog: list[IikoMenuItem]) -> 
             quantity = 1
         if not 1 <= quantity <= 99:
             continue
-        cleaned.append({"item_id": item.item_id, "name": item.name, "quantity": quantity})
+        cleaned.append({
+            "item_id": item.item_id,
+            "name": item.name,
+            "quantity": quantity,
+            "comment": f"{quantity} шт" if quantity > 1 else "",
+        })
     state = dict(state)
     state["items"] = cleaned
     prices = {item.item_id: item.price for item in catalog}
     state["total_complete"] = bool(cleaned) and all(prices.get(item["item_id"]) is not None for item in cleaned)
     state["total_amount"] = round(sum(float(prices[item["item_id"]] or 0) * item["quantity"] for item in cleaned), 2)
+    state["contains_roll99"] = any(item["item_id"] in ROLL_99_PRODUCT_IDS for item in cleaned)
+    if state.get("payment_method"):
+        ids, review_required = payment_plan(str(state["payment_method"]))
+        state["payment_type_ids"] = ids
+        state["payment_review_required"] = review_required
     return state
 
 

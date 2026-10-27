@@ -3,13 +3,14 @@
 {% block content %}
 <main class="glass-panel settings-panel">
   <section class="hero-row compact">
-    <div><div class="eyebrow">Тестовый входящий контур</div><h1>Принятые обращения</h1><p>Расшифровка, реплики робота и локальный черновик заказа.</p></div>
+    <div><div class="eyebrow">Контроль входящих заказов</div><h1>Принятые обращения</h1><p>Расшифровка, реплики робота и локальный черновик заказа перед ручной проверкой.</p></div>
     <span class="quiet-chip {{ 'ok' if enabled else 'wait' }}">{{ 'Включён' if enabled else 'Выключен' }}</span>
   </section>
   <section class="soft-card inbound-guard">
-    <div><span>Разрешённый номер</span><strong>{{ test_phone }}</strong></div>
+    <div><span>Режим звонков</span><strong>{{ 'тестовый номер' if operation_mode == 'test' else 'контролируемый оператором' }}</strong></div>
+    <div><span>Тестовый номер</span><strong>{{ test_phone }}</strong></div>
     <div><span>Перевод оператору</span><strong>через {{ transfer_delay }} сек.</strong></div>
-    <div><span>Запись в iiko</span><strong>заблокирована</strong></div>
+    <div><span>Автозапись в iiko</span><strong>заблокирована</strong></div>
     <div><span>Режим</span><strong>доставка + самовывоз</strong></div>
   </section>
   <section class="soft-card result-card">
@@ -31,6 +32,23 @@
         {% if call.draft %}<h3>Черновик заказа</h3><pre>{{ call.draft|tojson(indent=2) }}</pre>{% endif %}
         {% if call.transcript %}<h3>Диалог</h3><pre>{{ call.transcript }}</pre>{% endif %}
         {% if call.error %}<p class="call-error">{{ call.error }}</p>{% endif %}
+        {% if call.result == 'confirmed_draft' %}
+        <div class="review-actions">
+          <form method="post" action="/inbound/{{ call.id }}/review">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="decision" value="approve">
+            <button class="primary-button" type="submit">Одобрить черновик</button>
+          </form>
+          <form method="post" action="/inbound/{{ call.id }}/review">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="decision" value="reject">
+            <button class="secondary-button" type="submit">Отклонить</button>
+          </form>
+          <small>Одобрение фиксируется в журнале, но пока не отправляет заказ в iiko.</small>
+        </div>
+        {% elif call.result == 'operator_approved' %}
+        <p class="status-note">Оператор одобрил черновик. Отправка в iiko ещё технически заблокирована.</p>
+        {% endif %}
       </details>
       {% endfor %}
     </div>

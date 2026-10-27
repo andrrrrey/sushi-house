@@ -40,7 +40,7 @@ def test_unknown_model_items_are_removed_and_known_names_are_canonical():
         {"item_id": "hallucinated", "name": "Несуществующий ролл", "quantity": 1},
     ]
     checked = validate_order_items(state, catalog)
-    assert checked["items"] == [{"item_id": "1", "name": "Филадельфия", "quantity": 2}]
+    assert checked["items"] == [{"item_id": "1", "name": "Филадельфия", "quantity": 2, "comment": "2 шт"}]
 
 
 def test_new_order_questions_are_strictly_sequential():

@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from app.iiko_rules import is_yandex_restaurant_couriers_order
+
 
 IIKO_BASE_URL = "https://api-ru.iiko.services"
 RESTAURANT_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Irkutsk")
@@ -284,6 +286,8 @@ class IikoClient:
                 for wrapper in group.get("orders", []):
                     order = wrapper.get("order") or {}
                     if order.get("sourceKey") != "Starter":
+                        continue
+                    if is_yandex_restaurant_couriers_order(order):
                         continue
                     status = str(order.get("status") or wrapper.get("status") or "")
                     if status == "Cancelled" or order.get("cancelInfo") or not order.get("whenConfirmed"):

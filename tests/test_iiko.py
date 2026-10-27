@@ -85,6 +85,14 @@ class IikoClientTests(unittest.IsolatedAsyncioTestCase):
                             "cancelInfo": {"reason": "test"},
                         }},
                         {"order": {
+                            "number": "102",
+                            "sourceKey": "Starter",
+                            "status": "Closed",
+                            "whenConfirmed": "2026-09-23 12:22:00.000",
+                            "orderType": {"id": "9e36dff5-1114-471a-8b2c-7098d2314aa4", "name": "Яндекс Еда Курьеры ресторана"},
+                            "items": [],
+                        }},
+                        {"order": {
                             "number": "101",
                             "sourceKey": "Starter",
                             "status": "Closed",

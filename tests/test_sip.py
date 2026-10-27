@@ -41,7 +41,7 @@ class SipConfigTests(unittest.TestCase):
             "mango_inbound_enabled": "on",
             "mango_test_phone": "+79270120777",
         }
-        self.assertIn("context=mango-inbound-test", render_pjsip_config(settings))
+        self.assertIn("context=mango-inbound-enabled", render_pjsip_config(settings))
         dialplan = render_inbound_dialplan(settings)
         self.assertIn("exten => user9,1,Goto(inbound,1)", dialplan)
         self.assertIn('"${CALLER_DIGITS:-10}"="9270120777"', dialplan)
@@ -52,6 +52,16 @@ class SipConfigTests(unittest.TestCase):
     def test_inbound_enabled_requires_valid_test_phone(self):
         with self.assertRaises(SipError):
             render_inbound_dialplan({"mango_inbound_enabled": "on", "mango_test_phone": "225"})
+
+    def test_supervised_inbound_accepts_all_callers_without_test_phone(self):
+        settings = {
+            "mango_sip_login": "user9",
+            "mango_inbound_enabled": "on",
+            "inbound_operation_mode": "supervised",
+        }
+        dialplan = render_inbound_dialplan(settings)
+        self.assertIn("same => n,Goto(allowed)", dialplan)
+        self.assertNotIn("CALLER_DIGITS:-10", dialplan)
 
     def test_writes_private_configuration_atomically(self):
         with tempfile.TemporaryDirectory() as directory:
