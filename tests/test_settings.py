@@ -23,6 +23,7 @@ def test_voice_robot_settings_are_available():
         "inbound_free_condiments_text",
         "inbound_delivery_eta_minutes",
         "inbound_test_bonus_balance",
+        "iiko_write_enabled",
     }
 
     assert expected.issubset(SETTINGS_BY_KEY)

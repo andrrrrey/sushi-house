@@ -180,6 +180,13 @@ class IikoMenuItem:
     category: str
 
 
+@dataclass(frozen=True)
+class IikoOrderRoute:
+    organization_id: str
+    terminal_group_id: str
+    label: str
+
+
 class IikoClient:
     def __init__(
         self,
@@ -349,6 +356,39 @@ class IikoClient:
                         break
                 result.append(IikoMenuItem(item_id=item_id, name=name, price=price, category=category_name))
         return result
+
+    async def order_routes(self) -> list[IikoOrderRoute]:
+        """Return available organization/terminal pairs without changing iiko."""
+        organizations = (await self.post("/api/1/organizations", {})).get("organizations", [])
+        organization_names = {
+            str(item.get("id")): str(item.get("name") or item.get("id"))
+            for item in organizations if item.get("id")
+        }
+        if not organization_names:
+            return []
+        data = await self.post("/api/1/terminal_groups", {"organizationIds": list(organization_names)})
+        routes: list[IikoOrderRoute] = []
+        for group in data.get("terminalGroups") or []:
+            group_org_id = str(group.get("organizationId") or "")
+            for item in group.get("items") or []:
+                if item.get("isAlive") is False:
+                    continue
+                organization_id = str(item.get("organizationId") or group_org_id)
+                terminal_group_id = str(item.get("id") or "")
+                if not organization_id or not terminal_group_id:
+                    continue
+                organization_name = organization_names.get(organization_id, organization_id)
+                terminal_name = str(item.get("name") or terminal_group_id)
+                routes.append(IikoOrderRoute(
+                    organization_id=organization_id,
+                    terminal_group_id=terminal_group_id,
+                    label=f"{organization_name} — {terminal_name}",
+                ))
+        return sorted(routes, key=lambda route: route.label.casefold())
+
+    async def create_delivery_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a delivery/pickup order. Callers must enforce their own safety switch."""
+        return await self.post("/api/1/deliveries/create", payload)
 
     @staticmethod
     def _parse_iiko_datetime(value: str) -> datetime | None:

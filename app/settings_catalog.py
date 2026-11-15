@@ -25,6 +25,11 @@ SETTINGS = (
     SettingDefinition("iiko_api_login", "API Login", "iikoCloud", "Ключ доступа клиента iiko"),
     SettingDefinition("iiko_app_id", "App ID", "iikoCloud", "Идентификатор приложения", False),
     SettingDefinition("iiko_client_secret", "Client Secret", "iikoCloud", "Секрет приложения"),
+    SettingDefinition(
+        "iiko_write_enabled", "Отправка одобренных заказов", "iikoCloud",
+        "Разрешает только ручную отправку одобренного оператором заказа; по умолчанию выключена", False,
+        default="off", choices=(("off", "Выключена"), ("on", "Разрешена оператору")),
+    ),
     SettingDefinition("mango_sip_server", "SIP-сервер", "Mango Office", "Домен сервера Mango", False),
     SettingDefinition("mango_sip_port", "SIP-порт", "Mango Office", "Порт регистрации: 5060 или 60000", False, default="5060", placeholder="5060", max_length=5),
     SettingDefinition("mango_sip_login", "SIP-логин", "Mango Office", "Учётная запись робота", False),

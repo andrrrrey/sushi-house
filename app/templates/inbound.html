@@ -6,11 +6,15 @@
     <div><div class="eyebrow">Контроль входящих заказов</div><h1>Принятые обращения</h1><p>Расшифровка, реплики робота и локальный черновик заказа перед ручной проверкой.</p></div>
     <span class="quiet-chip {{ 'ok' if enabled else 'wait' }}">{{ 'Включён' if enabled else 'Выключен' }}</span>
   </section>
+  {% if reviewed %}<div class="notice success">Решение оператора сохранено.</div>{% endif %}
+  {% if iiko_checked %}<div class="notice success">Заказ проверен и подготовлен для iiko. Никакие данные в iiko не отправлялись.</div>{% endif %}
+  {% if iiko_sent %}<div class="notice success">Заказ создан в iiko.</div>{% endif %}
+  {% if iiko_error %}<div class="notice error">{{ iiko_error }}</div>{% endif %}
   <section class="soft-card inbound-guard">
     <div><span>Режим звонков</span><strong>{{ 'тестовый номер' if operation_mode == 'test' else 'контролируемый оператором' }}</strong></div>
     <div><span>Тестовый номер</span><strong>{{ test_phone }}</strong></div>
     <div><span>Перевод оператору</span><strong>через {{ transfer_delay }} сек.</strong></div>
-    <div><span>Автозапись в iiko</span><strong>заблокирована</strong></div>
+    <div><span>Ручная отправка в iiko</span><strong>{{ 'разрешена оператору' if iiko_write_enabled else 'выключена' }}</strong></div>
     <div><span>Режим</span><strong>доставка + самовывоз</strong></div>
   </section>
   <section class="soft-card result-card">
@@ -47,7 +51,39 @@
           <small>Одобрение фиксируется в журнале, но пока не отправляет заказ в iiko.</small>
         </div>
         {% elif call.result == 'operator_approved' %}
-        <p class="status-note">Оператор одобрил черновик. Отправка в iiko ещё технически заблокирована.</p>
+        <div class="iiko-review-panel">
+          <p class="status-note">Оператор одобрил черновик. Выберите точку iiko и выполните безопасную проверку.</p>
+          {% if iiko_routes %}
+          <form method="post" action="/inbound/{{ call.id }}/iiko/validate" class="iiko-route-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <select name="route" aria-label="Точка iiko" required>
+              <option value="">Выберите организацию и терминал</option>
+              {% for route in iiko_routes %}
+              <option value="{{ route.organization_id }}|{{ route.terminal_group_id }}" {% if call.iiko_submission and call.iiko_submission.route_label == route.label %}selected{% endif %}>{{ route.label }}</option>
+              {% endfor %}
+            </select>
+            <button class="secondary-button" type="submit">Проверить для iiko</button>
+          </form>
+          {% else %}
+          <p class="call-error">Точки iiko недоступны: {{ iiko_routes_error or 'список пуст' }}</p>
+          {% endif %}
+          {% if call.iiko_submission %}
+          <div class="iiko-submission-status">
+            <span>Подготовка: <strong>{{ call.iiko_submission.status }}</strong></span>
+            <span>Точка: <strong>{{ call.iiko_submission.route_label or '—' }}</strong></span>
+            {% if call.iiko_submission.order_id %}<span>ID заказа: <code>{{ call.iiko_submission.order_id }}</code></span>{% endif %}
+            {% if call.iiko_submission.correlation_id %}<span>Correlation ID: <code>{{ call.iiko_submission.correlation_id }}</code></span>{% endif %}
+            {% if call.iiko_submission.error %}<p class="call-error">{{ call.iiko_submission.error }}</p>{% endif %}
+          </div>
+          {% if call.iiko_submission.status in ['validated', 'failed'] %}
+          <form method="post" action="/inbound/{{ call.id }}/iiko/send" class="iiko-send-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="primary-button" type="submit" {{ 'disabled' if not iiko_write_enabled else '' }}>Создать заказ в iiko</button>
+            <small>{{ 'Отправка разрешена настройкой и выполняется только по нажатию оператора.' if iiko_write_enabled else 'Отправка выключена в настройках. Проверка не создаёт заказ.' }}</small>
+          </form>
+          {% endif %}
+          {% endif %}
+        </div>
         {% endif %}
       </details>
       {% endfor %}

@@ -17,7 +17,8 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.db import Base, SessionLocal, engine
-from app.iiko import IikoClient, IikoError
+from app.iiko import IikoClient, IikoError, IikoOrderRoute
+from app.iiko_write import IikoOrderValidationError, prepare_iiko_delivery_order
 from app.mango import (
     MangoApiError,
     MangoClient,
@@ -29,7 +30,7 @@ from app.mango import (
     verify_signature,
 )
 from app.knowledge_seed import seed_knowledge_base
-from app.models import AuditEvent, InboundCall, IntegrationSetting, KnowledgeEntry, MangoCallEvent, MangoRouteAttempt, TestCall, User
+from app.models import AuditEvent, IikoOrderSubmission, InboundCall, IntegrationSetting, KnowledgeEntry, MangoCallEvent, MangoRouteAttempt, TestCall, User
 from app.realtime import ACTIVE_CALL_STATES, RealtimeBridgeError, YandexVoiceClient, audio_bridge, pcm16_wav
 from app.security import decrypt_setting, encrypt_setting, get_csrf_token, hash_password, verify_csrf, verify_password
 from app.settings_catalog import SETTINGS, SETTINGS_BY_KEY
@@ -68,7 +69,7 @@ async def lifespan(_: FastAPI):
         engine.dispose()
 
 
-app = FastAPI(title="Sushi House Voice Robot", version="0.14.0", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Sushi House Voice Robot", version="0.15.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=[
@@ -466,18 +467,29 @@ async def knowledge_update(
 
 
 @app.get("/inbound", response_class=HTMLResponse)
-async def inbound_page(request: Request):
+async def inbound_page(
+    request: Request,
+    reviewed: str | None = None,
+    iiko_checked: str | None = None,
+    iiko_sent: str | None = None,
+    iiko_error: str | None = None,
+):
     user = require_user(request)
     if isinstance(user, RedirectResponse):
         return user
     with SessionLocal() as db:
         records = db.scalars(select(InboundCall).order_by(InboundCall.created_at.desc()).limit(100)).all()
+        submissions = {
+            item.inbound_call_id: item
+            for item in db.scalars(select(IikoOrderSubmission)).all()
+        }
     calls = []
     for record in records:
         try:
             draft = json.loads(record.draft_order or "{}")
         except ValueError:
             draft = {}
+        submission = submissions.get(record.id)
         calls.append({
             "id": record.id,
             "created_at": record.created_at.strftime("%d.%m.%Y %H:%M:%S"),
@@ -492,8 +504,31 @@ async def inbound_page(request: Request):
             "transcript": record.transcript,
             "draft": draft,
             "error": record.error,
+            "iiko_submission": ({
+                "status": submission.status,
+                "route_label": submission.route_label,
+                "correlation_id": submission.correlation_id,
+                "order_id": submission.iiko_order_id,
+                "error": submission.error,
+            } if submission else None),
         })
-    inbound_settings = load_settings("mango_inbound_enabled", "inbound_operation_mode", "mango_test_phone", "mango_transfer_delay_seconds")
+    inbound_settings = load_settings(
+        "mango_inbound_enabled", "inbound_operation_mode", "mango_test_phone",
+        "mango_transfer_delay_seconds", "iiko_write_enabled",
+        "iiko_api_login", "iiko_app_id", "iiko_client_secret",
+    )
+    routes: list[IikoOrderRoute] = []
+    routes_error = ""
+    if all(inbound_settings.get(key) for key in ("iiko_api_login", "iiko_app_id", "iiko_client_secret")):
+        try:
+            async with IikoClient(
+                inbound_settings["iiko_api_login"], inbound_settings["iiko_app_id"], inbound_settings["iiko_client_secret"]
+            ) as iiko_client:
+                routes = await iiko_client.order_routes()
+        except IikoError as exc:
+            routes_error = str(exc)
+    else:
+        routes_error = "Не заполнены параметры подключения iiko"
     return templates.TemplateResponse(
         request=request,
         name="inbound.html",
@@ -503,6 +538,13 @@ async def inbound_page(request: Request):
             operation_mode=inbound_settings.get("inbound_operation_mode", "test"),
             test_phone=mask_phone(inbound_settings.get("mango_test_phone", "")) if inbound_settings.get("mango_test_phone") else "—",
             transfer_delay=inbound_settings.get("mango_transfer_delay_seconds", SETTINGS_BY_KEY["mango_transfer_delay_seconds"].default),
+            iiko_write_enabled=inbound_settings.get("iiko_write_enabled", "off") == "on",
+            iiko_routes=routes,
+            iiko_routes_error=routes_error,
+            reviewed=reviewed,
+            iiko_checked=iiko_checked,
+            iiko_sent=iiko_sent,
+            iiko_error=iiko_error,
         ),
     )
 
@@ -533,6 +575,164 @@ async def review_inbound_call(
             details=f"{call_id}; iiko_write=false",
         ))
     return RedirectResponse(f"/inbound?reviewed={call_id}", status_code=303)
+
+
+def find_iiko_route(routes: list[IikoOrderRoute], organization_id: str, terminal_group_id: str) -> IikoOrderRoute | None:
+    return next((
+        route for route in routes
+        if route.organization_id == organization_id and route.terminal_group_id == terminal_group_id
+    ), None)
+
+
+async def load_iiko_order_context() -> tuple[dict[str, str], list[IikoOrderRoute], list]:
+    settings = load_settings("iiko_api_login", "iiko_app_id", "iiko_client_secret", "iiko_write_enabled")
+    if not all(settings.get(key) for key in ("iiko_api_login", "iiko_app_id", "iiko_client_secret")):
+        raise IikoError("Не заполнены параметры подключения iiko")
+    async with IikoClient(
+        settings["iiko_api_login"], settings["iiko_app_id"], settings["iiko_client_secret"]
+    ) as client:
+        routes, catalog = await asyncio.gather(client.order_routes(), client.external_menu_items())
+    return settings, routes, catalog
+
+
+@app.post("/inbound/{call_id}/iiko/validate")
+async def validate_inbound_for_iiko(
+    request: Request,
+    call_id: str,
+    route: str = Form(...),
+    csrf_token: str = Form(...),
+):
+    verify_csrf(request, csrf_token)
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    with SessionLocal() as db:
+        record = db.get(InboundCall, call_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Звонок не найден")
+        if record.result != "operator_approved":
+            error = quote_plus("Сначала оператор должен одобрить подтверждённый клиентом черновик")
+            return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+        try:
+            draft = json.loads(record.draft_order or "{}")
+        except ValueError:
+            error = quote_plus("Черновик заказа повреждён и не может быть отправлен")
+            return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+    try:
+        organization_id, terminal_group_id = route.split("|", 1)
+        if not organization_id or not terminal_group_id:
+            raise ValueError
+    except ValueError:
+        error = quote_plus("Выберите организацию и терминал iiko")
+        return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+    try:
+        _, routes, catalog = await load_iiko_order_context()
+        route = find_iiko_route(routes, organization_id, terminal_group_id)
+        if not route:
+            raise IikoOrderValidationError(["Выбранная точка отсутствует среди доступных терминалов iiko"])
+        prepared = prepare_iiko_delivery_order(call_id, draft, route, catalog)
+    except (IikoError, IikoOrderValidationError, ValueError) as exc:
+        error = quote_plus(str(exc))
+        return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+    with SessionLocal.begin() as db:
+        submission = db.scalar(select(IikoOrderSubmission).where(IikoOrderSubmission.inbound_call_id == call_id))
+        if submission and submission.status == "succeeded":
+            error = quote_plus("Заказ уже был создан в iiko; повторная отправка заблокирована")
+            return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+        if not submission:
+            submission = IikoOrderSubmission(
+                inbound_call_id=call_id,
+                idempotency_key=prepared.idempotency_key,
+                organization_id=route.organization_id,
+                terminal_group_id=route.terminal_group_id,
+            )
+            db.add(submission)
+        submission.organization_id = route.organization_id
+        submission.terminal_group_id = route.terminal_group_id
+        submission.route_label = route.label
+        submission.idempotency_key = prepared.idempotency_key
+        submission.status = "validated"
+        submission.request_json = json.dumps(prepared.payload, ensure_ascii=False)
+        submission.response_json = "{}"
+        submission.error = ""
+        submission.updated_at = datetime.now(UTC)
+        db.add(AuditEvent(event_type="iiko_order_validated", actor=user.username, details=f"{call_id}; {route.label}; write=false"))
+    return RedirectResponse(f"/inbound?iiko_checked={call_id}", status_code=303)
+
+
+@app.post("/inbound/{call_id}/iiko/send")
+async def send_inbound_to_iiko(
+    request: Request,
+    call_id: str,
+    csrf_token: str = Form(...),
+):
+    verify_csrf(request, csrf_token)
+    user = require_user(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    settings = load_settings("iiko_write_enabled", "iiko_api_login", "iiko_app_id", "iiko_client_secret")
+    if settings.get("iiko_write_enabled", "off") != "on":
+        error = quote_plus("Отправка в iiko выключена в настройках")
+        return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+    with SessionLocal() as db:
+        record = db.get(InboundCall, call_id)
+        submission = db.scalar(select(IikoOrderSubmission).where(IikoOrderSubmission.inbound_call_id == call_id))
+        if not record or not submission:
+            error = quote_plus("Сначала выполните проверку заказа для iiko")
+            return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+        if submission.status == "succeeded":
+            error = quote_plus("Заказ уже создан в iiko; повторная отправка заблокирована")
+            return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+        if submission.status == "sending":
+            error = quote_plus("Заказ уже отправляется; дождитесь результата")
+            return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+        try:
+            draft = json.loads(record.draft_order or "{}")
+        except ValueError:
+            error = quote_plus("Черновик заказа повреждён и не может быть отправлен")
+            return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+        organization_id = submission.organization_id
+        terminal_group_id = submission.terminal_group_id
+    try:
+        async with IikoClient(settings["iiko_api_login"], settings["iiko_app_id"], settings["iiko_client_secret"]) as client:
+            routes, catalog = await asyncio.gather(client.order_routes(), client.external_menu_items())
+            route = find_iiko_route(routes, organization_id, terminal_group_id)
+            if not route:
+                raise IikoOrderValidationError(["Выбранная точка больше недоступна в iiko"])
+            prepared = prepare_iiko_delivery_order(call_id, draft, route, catalog)
+            with SessionLocal.begin() as db:
+                current = db.scalar(select(IikoOrderSubmission).where(IikoOrderSubmission.inbound_call_id == call_id))
+                if not current or current.status in {"sending", "succeeded"}:
+                    raise IikoOrderValidationError(["Повторная отправка заказа заблокирована"])
+                current.status = "sending"
+                current.request_json = json.dumps(prepared.payload, ensure_ascii=False)
+                current.error = ""
+            response = await client.create_delivery_order(prepared.payload)
+    except (IikoError, IikoOrderValidationError, ValueError) as exc:
+        with SessionLocal.begin() as db:
+            current = db.scalar(select(IikoOrderSubmission).where(IikoOrderSubmission.inbound_call_id == call_id))
+            if current and current.status != "succeeded":
+                current.status = "failed"
+                current.error = str(exc)[:4000]
+                current.updated_at = datetime.now(UTC)
+            db.add(AuditEvent(event_type="iiko_order_failed", actor=user.username, details=f"{call_id}; {str(exc)[:1000]}"))
+        error = quote_plus(str(exc))
+        return RedirectResponse(f"/inbound?iiko_error={error}", status_code=303)
+
+    order_info = response.get("orderInfo") or response.get("order") or {}
+    correlation_id = str(response.get("correlationId") or "")
+    order_id = str(order_info.get("id") or response.get("orderId") or "")
+    with SessionLocal.begin() as db:
+        current = db.scalar(select(IikoOrderSubmission).where(IikoOrderSubmission.inbound_call_id == call_id))
+        if current:
+            current.status = "succeeded"
+            current.response_json = json.dumps(response, ensure_ascii=False)
+            current.correlation_id = correlation_id
+            current.iiko_order_id = order_id
+            current.error = ""
+            current.updated_at = datetime.now(UTC)
+        db.add(AuditEvent(event_type="iiko_order_created", actor=user.username, details=f"{call_id}; {order_id}; {correlation_id}"))
+    return RedirectResponse(f"/inbound?iiko_sent={call_id}", status_code=303)
 
 
 @app.post("/calls/test/start")

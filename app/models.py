@@ -123,3 +123,22 @@ class InboundCall(Base):
     error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IikoOrderSubmission(Base):
+    __tablename__ = "iiko_order_submissions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    inbound_call_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    organization_id: Mapped[str] = mapped_column(String(64))
+    terminal_group_id: Mapped[str] = mapped_column(String(64))
+    route_label: Mapped[str] = mapped_column(String(240), default="")
+    status: Mapped[str] = mapped_column(String(32), index=True, default="validated")
+    request_json: Mapped[str] = mapped_column(Text, default="{}")
+    response_json: Mapped[str] = mapped_column(Text, default="{}")
+    correlation_id: Mapped[str] = mapped_column(String(128), default="")
+    iiko_order_id: Mapped[str] = mapped_column(String(128), default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)

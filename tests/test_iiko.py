@@ -50,6 +50,30 @@ class SpokenOrderTests(unittest.TestCase):
 
 
 class IikoClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_order_routes_and_create_delivery_use_expected_endpoints(self):
+        captured = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v2/access_token":
+                return httpx.Response(200, json={"token": "test-token"})
+            if request.url.path == "/api/1/organizations":
+                return httpx.Response(200, json={"organizations": [{"id": "org-1", "name": "Смолина"}]})
+            if request.url.path == "/api/1/terminal_groups":
+                return httpx.Response(200, json={"terminalGroups": [{
+                    "organizationId": "org-1",
+                    "items": [{"id": "terminal-1", "name": "Доставка", "isAlive": True}],
+                }]})
+            self.assertEqual(request.url.path, "/api/1/deliveries/create")
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, json={"correlationId": "corr-1", "orderInfo": {"id": "order-1"}})
+
+        async with IikoClient("login", "app", "secret", transport=httpx.MockTransport(handler)) as client:
+            routes = await client.order_routes()
+            response = await client.create_delivery_order({"organizationId": "org-1", "order": {"items": []}})
+
+        self.assertEqual(routes[0].label, "Смолина — Доставка")
+        self.assertEqual(captured["organizationId"], "org-1")
+        self.assertEqual(response["orderInfo"]["id"], "order-1")
     async def test_customer_bonus_balance_uses_bonus_wallets(self):
         async def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/api/v2/access_token":
